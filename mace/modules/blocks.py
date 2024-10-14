@@ -33,6 +33,46 @@ from .symmetric_contraction import SymmetricContraction
 
 
 @compile_mode("script")
+class LinearReadoutBlockPartial(torch.nn.Module):
+    def __init__(self, linear, idx):
+        super().__init__()
+        self.linear = linear
+        self.idx = idx
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        heads: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
+        n_nodes = x.shape[0]
+        return self.linear(x)[:, self.idx].reshape(n_nodes, 1)  # [n_nodes, 1]
+
+@compile_mode("script")
+class NonLinearReadoutBlockPartial(torch.nn.Module):
+    def __init__(
+        self,
+        original_nl,
+        idx
+    ):
+        super().__init__()
+        self.hidden_irreps = original_nl.hidden_irreps
+        self.num_heads = 2
+        self.linear_1 = original_nl.linear_1 #o3.Linear(irreps_in=irreps_in, irreps_out=self.hidden_irreps)
+        self.non_linearity = original_nl.non_linearity #nn.Activation(irreps_in=self.hidden_irreps, acts=[gate])
+        self.linear_2 = original_nl.linear_2 #o3.Linear(irreps_in=self.hidden_irreps, irreps_out=irrep_out)
+        self.idx = idx
+        assert self.linear_2.irreps_out == o3.Irreps("2x0e")
+
+    def forward(
+        self, x: torch.Tensor, heads: torch.Tensor
+    ) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
+        n_nodes = x.shape[0]
+        x = self.non_linearity(self.linear_1(x))
+        heads = torch.ones_like(heads) * self.idx
+        x = mask_head(x, heads, self.num_heads)
+        return self.linear_2(x)[:, self.idx].reshape(n_nodes, 1)
+
+@compile_mode("script")
 class LinearNodeEmbeddingBlock(torch.nn.Module):
     def __init__(self, irreps_in: o3.Irreps, irreps_out: o3.Irreps):
         super().__init__()
