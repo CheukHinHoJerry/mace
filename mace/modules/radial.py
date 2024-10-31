@@ -263,8 +263,8 @@ class AgnesiTransform(torch.nn.Module):
         node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
             -1
         )
-        Z_u = node_atomic_numbers[sender]
-        Z_v = node_atomic_numbers[receiver]
+        Z_u = node_atomic_numbers[sender].to(torch.int64)
+        Z_v = node_atomic_numbers[receiver].to(torch.int64)
         r_0 = 0.5 * (self.covalent_radii[Z_u] + self.covalent_radii[Z_v])
         return (
             1 + (self.a * ((x / r_0) ** self.q) / (1 + (x / r_0) ** (self.q - self.p)))
@@ -309,8 +309,8 @@ class SoftTransform(torch.nn.Module):
         node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
             -1
         )
-        Z_u = node_atomic_numbers[sender]
-        Z_v = node_atomic_numbers[receiver]
+        Z_u = node_atomic_numbers[sender].to(torch.int64)
+        Z_v = node_atomic_numbers[receiver].to(torch.int64)
         r_0 = (self.covalent_radii[Z_u] + self.covalent_radii[Z_v]) / 4
         y = (
             x

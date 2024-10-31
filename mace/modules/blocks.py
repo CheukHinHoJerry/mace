@@ -197,7 +197,7 @@ class AtomicEnergiesBlock(torch.nn.Module):
     def forward(
         self, x: torch.Tensor  # one-hot of elements [..., n_elements]
     ) -> torch.Tensor:  # [..., ]
-        return torch.matmul(x, torch.atleast_2d(self.atomic_energies).T)
+        return torch.matmul(x, torch.atleast_2d(self.atomic_energies).T.to(torch.float64))
 
     def __repr__(self):
         formatted_energies = ", ".join(
