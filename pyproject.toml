@@ -39,6 +39,3 @@ ignore-paths = [
     "^mace/tools/torch_geometric/.*$",
     "^mace/tools/scatter.py$",
 ]
-
-[tool.pylint.FORMAT]
-max-module-lines = 1500

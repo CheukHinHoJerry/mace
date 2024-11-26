@@ -14,9 +14,7 @@ from mace.calculators.mace import MACECalculator
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+    parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="path to XYZ configurations", required=True)
     parser.add_argument(
         "--config_index", help="index of configuration", type=int, default=-1
