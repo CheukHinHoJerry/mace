@@ -15,6 +15,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
 
         parser = configargparse.ArgumentParser(
             config_file_parser_class=configargparse.YAMLConfigFileParser,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
         parser.add(
             "--config",
@@ -23,7 +24,9 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             help="config file to agregate options",
         )
     except ImportError:
-        parser = argparse.ArgumentParser()
+        parser = argparse.ArgumentParser(
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        )
 
     # Name and seed
     parser.add_argument("--name", help="experiment name", required=True)
@@ -358,6 +361,13 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument(
+        "--foundation_head",
+        help="Name of the head to use for fine-tuning",
+        type=str,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
         "--weight_pt_head",
         help="Weight of the pretrained head in the loss function",
         type=float,
@@ -650,6 +660,13 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=check_float_or_none,
         default=10.0,
     )
+    # option for cuequivariance acceleration
+    parser.add_argument(
+        "--enable_cueq",
+        help="Enable cuequivariance acceleration",
+        type=str2bool,
+        default=False,
+    )
     # options for using Weights and Biases for experiment tracking
     # to install see https://wandb.ai
     parser.add_argument(
@@ -704,7 +721,9 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
 
 
 def build_preprocess_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--train_file",
         help="Training set h5 file",
