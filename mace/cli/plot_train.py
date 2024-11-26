@@ -60,10 +60,7 @@ def parse_training_results(path: str) -> List[dict]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Plot mace training statistics",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+    parser = argparse.ArgumentParser(description="Plot mace training statistics")
     parser.add_argument(
         "--path", help="path to results file or directory", required=True
     )
