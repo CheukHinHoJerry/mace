@@ -196,8 +196,8 @@ class ZBLBasis(torch.nn.Module):
         node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
             -1
         )
-        Z_u = node_atomic_numbers[sender]
-        Z_v = node_atomic_numbers[receiver]
+        Z_u = node_atomic_numbers[sender].to(torch.int64)
+        Z_v = node_atomic_numbers[receiver].to(torch.int64)
         a = (
             self.a_prefactor
             * 0.529
@@ -262,10 +262,9 @@ class AgnesiTransform(torch.nn.Module):
         node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
             -1
         )
-        Z_u = node_atomic_numbers[sender]
-        Z_v = node_atomic_numbers[receiver]
-        r_0: torch.Tensor = 0.5 * (self.covalent_radii[Z_u] + self.covalent_radii[Z_v])
-        r_over_r_0 = x / r_0
+        Z_u = node_atomic_numbers[sender].to(torch.int64)
+        Z_v = node_atomic_numbers[receiver].to(torch.int64)
+        r_0 = 0.5 * (self.covalent_radii[Z_u] + self.covalent_radii[Z_v])
         return (
             1
             + (
@@ -333,8 +332,8 @@ class SoftTransform(torch.nn.Module):
         node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
             -1
         )
-        Z_u = node_atomic_numbers[sender]
-        Z_v = node_atomic_numbers[receiver]
+        Z_u = node_atomic_numbers[sender].to(torch.int64)
+        Z_v = node_atomic_numbers[receiver].to(torch.int64)
         r_0: torch.Tensor = self.covalent_radii[Z_u] + self.covalent_radii[Z_v]
         return r_0
 
