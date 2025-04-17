@@ -42,6 +42,7 @@ class AtomicData(torch_geometric.data.Data):
     forces_weight: torch.Tensor
     stress_weight: torch.Tensor
     virials_weight: torch.Tensor
+    magmom_weight: torch.Tensor
 
     def __init__(
         self,
@@ -57,12 +58,14 @@ class AtomicData(torch_geometric.data.Data):
         forces_weight: Optional[torch.Tensor],  # [,]
         stress_weight: Optional[torch.Tensor],  # [,]
         virials_weight: Optional[torch.Tensor],  # [,]
+        magmom_weight: Optional[torch.Tensor],  # [,]
         forces: Optional[torch.Tensor],  # [n_nodes, 3]
         energy: Optional[torch.Tensor],  # [, ]
         stress: Optional[torch.Tensor],  # [1,3,3]
         virials: Optional[torch.Tensor],  # [1,3,3]
         dipole: Optional[torch.Tensor],  # [, 3]
         charges: Optional[torch.Tensor],  # [n_nodes, ]
+        magmom: Optional[torch.Tensor] # [n_nodes, 3]
     ):
         # Check shapes
         num_nodes = node_attrs.shape[0]
@@ -78,6 +81,7 @@ class AtomicData(torch_geometric.data.Data):
         assert forces_weight is None or len(forces_weight.shape) == 0
         assert stress_weight is None or len(stress_weight.shape) == 0
         assert virials_weight is None or len(virials_weight.shape) == 0
+        assert magmom_weight is None or len(forces_weight.shape) == 0
         assert cell is None or cell.shape == (3, 3)
         assert forces is None or forces.shape == (num_nodes, 3)
         assert energy is None or len(energy.shape) == 0
@@ -85,6 +89,10 @@ class AtomicData(torch_geometric.data.Data):
         assert virials is None or virials.shape == (1, 3, 3)
         assert dipole is None or dipole.shape[-1] == 3
         assert charges is None or charges.shape == (num_nodes,)
+        print(forces.shape)
+        print(magmom.shape)
+        assert magmom is None or magmom.shape == (num_nodes, 3)
+
         # Aggregate data
         data = {
             "num_nodes": num_nodes,
@@ -100,12 +108,14 @@ class AtomicData(torch_geometric.data.Data):
             "forces_weight": forces_weight,
             "stress_weight": stress_weight,
             "virials_weight": virials_weight,
+            "magmom_weight": magmom_weight,
             "forces": forces,
             "energy": energy,
             "stress": stress,
             "virials": virials,
             "dipole": dipole,
             "charges": charges,
+            "magmom": magmom,
         }
         super().__init__(**data)
 
@@ -170,6 +180,13 @@ class AtomicData(torch_geometric.data.Data):
             else 1
         )
 
+        magmom_weight = (
+            torch.tensor(config.magmom_weight, dtype=torch.get_default_dtype())
+            if config.magmom_weight is not None
+            else 1
+        )
+
+
         forces = (
             torch.tensor(config.forces, dtype=torch.get_default_dtype())
             if config.forces is not None
@@ -194,6 +211,7 @@ class AtomicData(torch_geometric.data.Data):
             if config.virials is not None
             else None
         )
+        
         dipole = (
             torch.tensor(config.dipole, dtype=torch.get_default_dtype()).unsqueeze(0)
             if config.dipole is not None
@@ -204,7 +222,11 @@ class AtomicData(torch_geometric.data.Data):
             if config.charges is not None
             else None
         )
-
+        magmom = (
+            torch.tensor(config.magmom, dtype=torch.get_default_dtype())
+            if config.magmom is not None
+            else None
+        )
         return cls(
             edge_index=torch.tensor(edge_index, dtype=torch.long),
             positions=torch.tensor(config.positions, dtype=torch.get_default_dtype()),
@@ -218,12 +240,14 @@ class AtomicData(torch_geometric.data.Data):
             forces_weight=forces_weight,
             stress_weight=stress_weight,
             virials_weight=virials_weight,
+            magmom_weight=magmom_weight,
             forces=forces,
             energy=energy,
             stress=stress,
             virials=virials,
             dipole=dipole,
             charges=charges,
+            magmom=magmom,
         )
 
 

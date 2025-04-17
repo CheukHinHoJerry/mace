@@ -21,6 +21,7 @@ Forces = np.ndarray  # [..., 3]
 Stress = np.ndarray  # [6, ], [3,3], [9, ]
 Virials = np.ndarray  # [6, ], [3,3], [9, ]
 Charges = np.ndarray  # [..., 1]
+Magmom = np.ndarray  # [..., 3]
 Cell = np.ndarray  # [3,3]
 Pbc = tuple  # (3,)
 
@@ -38,6 +39,7 @@ class Configuration:
     virials: Optional[Virials] = None  # eV
     dipole: Optional[Vector] = None  # Debye
     charges: Optional[Charges] = None  # atomic unit
+    magmom: Optional[Magmom] = None
     cell: Optional[Cell] = None
     pbc: Optional[Pbc] = None
 
@@ -46,6 +48,7 @@ class Configuration:
     forces_weight: float = 1.0  # weight of config forces in loss
     stress_weight: float = 1.0  # weight of config stress in loss
     virials_weight: float = 1.0  # weight of config virial in loss
+    magmom_weight: float = 1.0  # weight of config virial in loss
     config_type: Optional[str] = DEFAULT_CONFIG_TYPE  # config_type of config
     head: Optional[str] = "Default"  # head used to compute the config
 

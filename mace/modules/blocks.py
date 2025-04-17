@@ -256,17 +256,21 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         use_sc: bool = True,
         num_elements: Optional[int] = None,
         cueq_config: Optional[CuEquivarianceConfig] = None,
+        contraction_cls: Optional[str] = "SymmetricContraction"
     ) -> None:
         super().__init__()
 
         self.use_sc = use_sc
-        self.symmetric_contractions = SymmetricContractionWrapper(
-            irreps_in=node_feats_irreps,
-            irreps_out=target_irreps,
-            correlation=correlation,
-            num_elements=num_elements,
-            cueq_config=cueq_config,
-        )
+        if contraction_cls == "SymmetricContraction":
+            self.symmetric_contractions = SymmetricContractionWrapper(
+                irreps_in=node_feats_irreps,
+                irreps_out=target_irreps,
+                correlation=correlation,
+                num_elements=num_elements,
+                cueq_config=cueq_config,
+            )
+        else:
+            raise ValueError("Contraction class not supported")
         # Update linear
         self.linear = Linear(
             target_irreps,
