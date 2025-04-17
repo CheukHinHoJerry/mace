@@ -4,6 +4,7 @@
 # This program is distributed under the MIT License (see MIT.md)
 ###########################################################################################
 
+from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import numpy as np
@@ -26,6 +27,15 @@ from .blocks import (
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
     ScaleShiftBlock,
+)
+
+from .radial import (
+    AgnesiTransform,
+    BesselBasis,
+    ChebychevBasis,
+    GaussianBasis,
+    PolynomialCutoff,
+    SoftTransform,
 )
 from .utils import (
     compute_fixed_charge_dipole,
@@ -469,8 +479,222 @@ class ScaleShiftMACE(MACE):
 
         return output
 
+
 @compile_mode("script")
-class MagneticScaleShiftMACE(MACE):
+class MagneticMACE(torch.nn.Module):
+    def __init__(
+        self,
+        r_max: float,
+        num_bessel: int,
+        num_polynomial_cutoff: int,
+        max_ell: int,
+        m_max: int,
+        num_mag_radial_basis: int, 
+        max_m_ell: int,
+        interaction_cls: Type[InteractionBlock],
+        interaction_cls_first: Type[InteractionBlock],
+        contraction_cls: str,
+        contraction_cls_first: str,
+        num_interactions: int,
+        num_elements: int,
+        hidden_irreps: o3.Irreps,
+        MLP_irreps: o3.Irreps,
+        atomic_energies: np.ndarray,
+        avg_num_neighbors: float,
+        atomic_numbers: List[int],
+        correlation: Union[int, List[int]],
+        gate: Optional[Callable],
+        pair_repulsion: bool = False,
+        distance_transform: str = "None",
+        radial_MLP: Optional[List[int]] = None,
+        radial_type: Optional[str] = "bessel",
+        heads: Optional[List[str]] = None,
+        cueq_config: Optional[Dict[str, Any]] = None, 
+    ):
+        super().__init__()
+        self.register_buffer(
+            "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.int64)
+        )
+        self.register_buffer(
+            "r_max", torch.tensor(r_max, dtype=torch.get_default_dtype())
+        )
+        self.register_buffer(
+            "num_interactions", torch.tensor(num_interactions, dtype=torch.int64)
+        )
+        if heads is None:
+            heads = ["default"]
+        self.heads = heads
+        if isinstance(correlation, int):
+            correlation = [correlation] * num_interactions
+        # Embedding
+        node_attr_irreps = o3.Irreps([(num_elements, (0, 1))])
+        node_feats_irreps = o3.Irreps([(hidden_irreps.count(o3.Irrep(0, 1)), (0, 1))])
+        self.node_embedding = LinearNodeEmbeddingBlock(
+            irreps_in=node_attr_irreps,
+            irreps_out=node_feats_irreps,
+            cueq_config=cueq_config,
+        )
+        self.radial_embedding = RadialEmbeddingBlock(
+            r_max=r_max,
+            num_bessel=num_bessel,
+            num_polynomial_cutoff=num_polynomial_cutoff,
+            radial_type=radial_type,
+            distance_transform=distance_transform,
+        )
+        edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
+        if pair_repulsion:
+            self.pair_repulsion_fn = ZBLBasis(p=num_polynomial_cutoff)
+            self.pair_repulsion = True
+
+        sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
+        num_features = hidden_irreps.count(o3.Irrep(0, 1))
+        interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
+        self.spherical_harmonics = o3.SphericalHarmonics(
+            sh_irreps, normalize=True, normalization="component"
+        )
+        if radial_MLP is None:
+            radial_MLP = [64, 64, 64]
+        # Interactions and readout
+        self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
+
+        # --- magnetic stuffs ---
+        self.mag_radial_embedding = BesselBasis(
+            r_max = m_max,
+            num_basis=num_mag_radial_basis,
+        )
+
+        magmom_sh_irreps = o3.Irreps.spherical_harmonics(max_m_ell)
+        # modify this
+        self.mag_spherical_harmonics = o3.SphericalHarmonics(
+            magmom_sh_irreps, normalize=True, normalization="component"
+        )
+
+        # --- interaction and product basis modules ---
+        inter = interaction_cls_first(
+            node_attrs_irreps=node_attr_irreps,
+            node_feats_irreps=node_feats_irreps,
+            edge_attrs_irreps=sh_irreps,
+            edge_feats_irreps=edge_feats_irreps,
+            target_irreps=interaction_irreps,
+            hidden_irreps=hidden_irreps,
+            avg_num_neighbors=avg_num_neighbors,
+            radial_MLP=radial_MLP,
+            cueq_config=cueq_config,
+            magmom_node_inv_feats_irreps=o3.Irreps(f"{len(self.mag_radial_embedding.bessel_weights)}x0e"),
+            magmom_node_attrs_irreps=magmom_sh_irreps
+        )
+        self.interactions = torch.nn.ModuleList([inter])
+
+        # Use the appropriate self connection at the first layer for proper E0
+        use_sc_first = False
+        if "Residual" in str(interaction_cls_first):
+            use_sc_first = True
+
+        node_feats_irreps_out = inter.target_irreps
+        prod = EquivariantProductBasisBlock(
+            node_feats_irreps=node_feats_irreps_out,
+            target_irreps=hidden_irreps,
+            correlation=correlation[0],
+            num_elements=num_elements,
+            use_sc=use_sc_first,
+            cueq_config=cueq_config,
+            contraction_cls=contraction_cls_first
+        )
+        magmom_prod = EquivariantProductBasisBlock(
+            node_feats_irreps=node_feats_irreps_out,
+            target_irreps=hidden_irreps,
+            correlation=correlation[0],
+            num_elements=num_elements,
+            use_sc=use_sc_first,
+            cueq_config=cueq_config,
+            contraction_cls=contraction_cls_first
+        )
+        self.products = torch.nn.ModuleList([prod])
+        self.magmom_products = torch.nn.ModuleList([magmom_prod])
+
+        self.readouts = torch.nn.ModuleList()
+        self.readouts.append(
+            LinearReadoutBlock(
+                hidden_irreps, o3.Irreps(f"{len(heads)}x0e"), cueq_config
+            )
+        )
+
+        for i in range(num_interactions - 1):
+            if i == num_interactions - 2:
+                hidden_irreps_out = str(
+                    hidden_irreps[0]
+                )  # Select only scalars for last layer
+            else:
+                hidden_irreps_out = hidden_irreps
+            inter = interaction_cls(
+                node_attrs_irreps=node_attr_irreps,
+                node_feats_irreps=hidden_irreps,
+                edge_attrs_irreps=sh_irreps,
+                edge_feats_irreps=edge_feats_irreps,
+                target_irreps=interaction_irreps,
+                hidden_irreps=hidden_irreps_out,
+                avg_num_neighbors=avg_num_neighbors,
+                radial_MLP=radial_MLP,
+                cueq_config=cueq_config,
+                magmom_node_inv_feats_irreps=o3.Irreps(f"{len(self.mag_radial_embedding.bessel_weights)}x0e"),
+                magmom_node_attrs_irreps=magmom_sh_irreps
+            )
+            self.interactions.append(inter)
+            prod = EquivariantProductBasisBlock(
+                node_feats_irreps=interaction_irreps,
+                target_irreps=hidden_irreps_out,
+                correlation=correlation[i + 1],
+                num_elements=num_elements,
+                use_sc=True,
+                cueq_config=cueq_config,
+                contraction_cls=contraction_cls
+            )
+            self.products.append(prod)
+
+            magmom_prod = EquivariantProductBasisBlock(
+                node_feats_irreps=interaction_irreps,
+                target_irreps=hidden_irreps_out,
+                correlation=correlation[i + 1],
+                num_elements=num_elements,
+                use_sc=True,
+                cueq_config=cueq_config,
+                contraction_cls=contraction_cls
+            )
+            self.magmom_products.append(magmom_prod)
+            
+            if i == num_interactions - 2:
+                self.readouts.append(
+                    NonLinearReadoutBlock(
+                        hidden_irreps_out,
+                        (len(heads) * MLP_irreps).simplify(),
+                        gate,
+                        o3.Irreps(f"{len(heads)}x0e"),
+                        len(heads),
+                        cueq_config,
+                    )
+                )
+            else:
+                self.readouts.append(
+                    LinearReadoutBlock(
+                        hidden_irreps, o3.Irreps(f"{len(heads)}x0e"), cueq_config
+                    )
+                )
+
+    @abstractmethod
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+        compute_hessian: bool = False,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        raise NotImplementedError
+
+@compile_mode("script")
+class MagneticScaleShiftMACE(MagneticMACE):
     def __init__(
         self,
         atomic_inter_scale: float,
@@ -533,8 +757,10 @@ class MagneticScaleShiftMACE(MACE):
             src=node_e0, index=data["batch"], dim=0, dim_size=num_graphs
         )  # [n_graphs, num_heads]
 
-        # Embeddings
+        # node embedding on species
         node_feats = self.node_embedding(data["node_attrs"])
+
+        # prepare the Rnl and Ylm
         vectors, lengths = get_edge_vectors_and_lengths(
             positions=data["positions"],
             edge_index=data["edge_index"],
@@ -550,25 +776,50 @@ class MagneticScaleShiftMACE(MACE):
             )
         else:
             pair_node_energy = torch.zeros_like(node_e0)
+
+        # --- magnetic stuffs ---
+        magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
+        magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-8)
+        #
+        magmom_node_inv_feats = self.mag_radial_embedding(magmom_lenghts) # (n_atoms, n_basis)
+        magmom_node_attrs = self.mag_spherical_harmonics(magmom_vectors)
+
+        # print('==============')
+        # print(data["magmom"].shape)
+        # print("magmom_lenghts.shape: ", magmom_lenghts.shape)
+        # print(magmom_vectors.shape)
+        # print(magmom_node_attrs.shape)
+        # print('==============')
+        #
+        
         # Interactions
         node_es_list = [pair_node_energy]
         node_feats_list = []
-        for interaction, product, readout in zip(
-            self.interactions, self.products, self.readouts
+        magmom_node_feats_list = []
+        for interaction, product, magmom_product, readout in zip(
+            self.interactions, self.products, self.magmom_products, self.readouts
         ):
-            node_feats, sc = interaction(
+            node_feats, magmom_node_feats, sc, magmom_sc = interaction(
                 node_attrs=data["node_attrs"],
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
                 edge_index=data["edge_index"],
+                magmom_node_inv_feats=magmom_node_inv_feats,
+                magmom_node_attrs=magmom_node_attrs
             )
             node_feats = product(
-                node_feats=node_feats, sc=sc, node_attrs=data["node_attrs"]
+                node_feats=node_feats, sc=sc,node_attrs=data["node_attrs"]
             )
+            magmom_node_feats = magmom_product(
+                node_feats=magmom_node_feats, sc=magmom_sc,node_attrs=data["node_attrs"]
+            )
+            print("node_feats.shape: ", node_feats.shape)
+            print("magmom_node_feats.shape: ", magmom_node_feats.shape)
             node_feats_list.append(node_feats)
+            magmom_node_feats_list.append(magmom_node_feats)
             node_es_list.append(
-                readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+                readout(node_feats + magmom_node_feats, node_heads)[num_atoms_arange, node_heads]
             )  # {[n_nodes, ], }
 
         # Concatenate node features
