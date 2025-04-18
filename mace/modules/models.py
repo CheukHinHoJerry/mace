@@ -558,7 +558,7 @@ class MagneticMACE(torch.nn.Module):
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
         # --- magnetic stuffs ---
-        self.mag_radial_embedding = BesselBasis(
+        self.mag_radial_embedding = ChebychevBasis(
             r_max = m_max,
             num_basis=num_mag_radial_basis,
         )
@@ -580,7 +580,7 @@ class MagneticMACE(torch.nn.Module):
             avg_num_neighbors=avg_num_neighbors,
             radial_MLP=radial_MLP,
             cueq_config=cueq_config,
-            magmom_node_inv_feats_irreps=o3.Irreps(f"{len(self.mag_radial_embedding.bessel_weights)}x0e"),
+            magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
             magmom_node_attrs_irreps=magmom_sh_irreps
         )
         self.interactions = torch.nn.ModuleList([inter])
@@ -720,9 +720,6 @@ class MagneticScaleShiftMACE(MagneticMACE):
         data["positions"].requires_grad_(True)
         data["node_attrs"].requires_grad_(True)
 
-        print('======')
-        print(data['magmom'])
-        print('======')
         num_graphs = data["ptr"].numel() - 1
         num_atoms_arange = torch.arange(data["positions"].shape[0])
         node_heads = (
@@ -779,19 +776,14 @@ class MagneticScaleShiftMACE(MagneticMACE):
 
         # --- magnetic stuffs ---
         magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
-        magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-8)
+        magmom_lenghts_trans = 1 - 2 * magmom_lenghts / self.mag_radial_embedding.r_max
+        magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-9)
         #
-        magmom_node_inv_feats = self.mag_radial_embedding(magmom_lenghts) # (n_atoms, n_basis)
+        magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
         magmom_node_attrs = self.mag_spherical_harmonics(magmom_vectors)
-
-        # print('==============')
-        # print(data["magmom"].shape)
-        # print("magmom_lenghts.shape: ", magmom_lenghts.shape)
-        # print(magmom_vectors.shape)
-        # print(magmom_node_attrs.shape)
-        # print('==============')
-        #
-        
+        #print(torch.any(torch.isnan(magmom_node_feats).flatten()))
+        #print(torch.min(magmom_lenghts), torch.max(magmom_lenghts))
+        #print(torch.any(torch.isnan(magmom_node_attrs).flatten()))
         # Interactions
         node_es_list = [pair_node_energy]
         node_feats_list = []
@@ -805,17 +797,16 @@ class MagneticScaleShiftMACE(MagneticMACE):
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
                 edge_index=data["edge_index"],
-                magmom_node_inv_feats=magmom_node_inv_feats,
+                magmom_node_inv_feats=magmom_node_feats,
                 magmom_node_attrs=magmom_node_attrs
             )
             node_feats = product(
                 node_feats=node_feats, sc=sc,node_attrs=data["node_attrs"]
             )
+            
             magmom_node_feats = magmom_product(
                 node_feats=magmom_node_feats, sc=magmom_sc,node_attrs=data["node_attrs"]
             )
-            print("node_feats.shape: ", node_feats.shape)
-            print("magmom_node_feats.shape: ", magmom_node_feats.shape)
             node_feats_list.append(node_feats)
             magmom_node_feats_list.append(magmom_node_feats)
             node_es_list.append(
@@ -860,7 +851,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
             "displacement": displacement,
             "node_feats": node_feats_out,
         }
-
+        #print("total energy: ", total_energy)
         return output
 
 class BOTNet(torch.nn.Module):

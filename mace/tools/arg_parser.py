@@ -125,6 +125,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "ScaleShiftBOTNet",
             "AtomicDipolesMACE",
             "EnergyDipolesMACE",
+            "MagneticScaleShiftMACE"
         ],
     )
     parser.add_argument(
@@ -172,6 +173,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticInteractionBlock",
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
+            "MagneticRealAgnosticDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -184,6 +186,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticInteractionBlock",
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
+            "MagneticRealAgnosticDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -799,6 +802,38 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "forces_weight",
         ],
     )
+
+    # --- magnetic ace ---
+    parser.add_argument(
+        "--m_max",
+        help="|m| basis m_max for magnetic momgent",
+        type=float,
+        default=3,
+    )
+    parser.add_argument(
+        "--max_m_ell",
+        help="max_ell for magnetic mace",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--num_mag_radial_basis",
+        help="number of radial basis for magnetic mace",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--contraction_cls_first",
+        help="Type of first contraction block used",
+        type=str,
+        default="SymmetricContraction",
+    )
+    parser.add_argument(
+        "--contraction_cls",
+        help="Type of contraction blocks used except first layer",
+        type=str,
+        default="SymmetricContraction",
+    )
     return parser
 
 
@@ -958,6 +993,7 @@ def build_preprocess_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=123,
     )
+
     return parser
 
 

@@ -140,6 +140,7 @@ def config_from_atoms(
     stress = atoms.info.get(stress_key, None)  # eV / Ang ^ 3
     virials = atoms.info.get(virials_key, None)
     dipole = atoms.info.get(dipole_key, None)  # Debye
+    magmom = atoms.arrays.get("dft_magmom", None)
     # Charges default to 0 instead of None if not found
     charges = atoms.arrays.get(charges_key, np.zeros(len(atoms)))  # atomic unit
     atomic_numbers = np.array(
@@ -178,6 +179,7 @@ def config_from_atoms(
     return Configuration(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
+        magmom=magmom,
         energy=energy,
         forces=forces,
         stress=stress,

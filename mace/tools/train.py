@@ -547,6 +547,7 @@ def evaluate(
             compute_stress=output_args["stress"],
         )
         avg_loss, aux = metrics(batch, output)
+        print("avg_loss:", avg_loss)
 
     avg_loss, aux = metrics.compute()
     aux["time"] = time.time() - start_time

@@ -369,7 +369,7 @@ class WeightedHuberEnergyForcesStressLoss(torch.nn.Module):
 
 class UniversalLoss(torch.nn.Module):
     def __init__(
-        self, energy_weight=1.0, forces_weight=1.0, stress_weight=1.0, huber_delta=0.01
+        self, energy_weight=1.0, forces_weight=1.0, stress_weight=1.0, magmom_weight=1.0, huber_delta=0.01
     ) -> None:
         super().__init__()
         self.huber_delta = huber_delta
@@ -384,6 +384,10 @@ class UniversalLoss(torch.nn.Module):
         self.register_buffer(
             "stress_weight",
             torch.tensor(stress_weight, dtype=torch.get_default_dtype()),
+        )
+        self.register_buffer(
+            "magmom_weight",
+            torch.tensor(magmom_weight, dtype=torch.get_default_dtype()),
         )
 
     def forward(

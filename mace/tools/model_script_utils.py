@@ -154,6 +154,8 @@ def configure_model(
             atomic_energies=atomic_energies,
             avg_num_neighbors=args.avg_num_neighbors,
             atomic_numbers=z_table.zs,
+            contraction_cls_first=args.contraction_cls_first,
+            contraction_cls=args.contraction_cls,
         )
         model_config_foundation = None
 
@@ -190,6 +192,25 @@ def _determine_atomic_inter_shift(mean, heads):
 def _build_model(
     args, model_config, model_config_foundation, heads
 ):  # pylint: disable=too-many-return-statements
+    
+    if args.model == "MagneticScaleShiftMACE":
+        return modules.MagneticScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=args.mean,
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=args.m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+        )
     if args.model == "MACE":
         if args.interaction_first not in [
             "RealAgnosticInteractionBlock",
