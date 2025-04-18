@@ -808,7 +808,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "--m_max",
         help="|m| basis m_max for magnetic momgent",
         type=float,
-        default=3,
+        nargs='+',
     )
     parser.add_argument(
         "--max_m_ell",

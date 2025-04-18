@@ -488,7 +488,7 @@ class MagneticMACE(torch.nn.Module):
         num_bessel: int,
         num_polynomial_cutoff: int,
         max_ell: int,
-        m_max: int,
+        m_max: List[int],
         num_mag_radial_basis: int, 
         max_m_ell: int,
         interaction_cls: Type[InteractionBlock],
@@ -517,6 +517,13 @@ class MagneticMACE(torch.nn.Module):
         )
         self.register_buffer(
             "r_max", torch.tensor(r_max, dtype=torch.get_default_dtype())
+        )
+        print("=====")
+        print("m_max: ", m_max)
+        print(atomic_numbers)
+        print("=====")
+        self.register_buffer(
+            "m_max", torch.tensor(m_max, dtype=torch.get_default_dtype())
         )
         self.register_buffer(
             "num_interactions", torch.tensor(num_interactions, dtype=torch.int64)
@@ -558,8 +565,10 @@ class MagneticMACE(torch.nn.Module):
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
         # --- magnetic stuffs ---
+        # m_max is not used here but Chebychev is still on (-1, 1)
+        # this needs to have a specicies dependent transform
         self.mag_radial_embedding = ChebychevBasis(
-            r_max = m_max,
+            r_max = 0,
             num_basis=num_mag_radial_basis,
         )
 
@@ -636,7 +645,7 @@ class MagneticMACE(torch.nn.Module):
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
-                magmom_node_inv_feats_irreps=o3.Irreps(f"{len(self.mag_radial_embedding.bessel_weights)}x0e"),
+                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
                 magmom_node_attrs_irreps=magmom_sh_irreps
             )
             self.interactions.append(inter)
@@ -776,7 +785,8 @@ class MagneticScaleShiftMACE(MagneticMACE):
 
         # --- magnetic stuffs ---
         magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
-        magmom_lenghts_trans = 1 - 2 * magmom_lenghts / self.mag_radial_embedding.r_max
+        element_dependent_scaling = self.m_max[torch.argmax(data["node_attrs"], dim=1)].unsqueeze(-1)
+        magmom_lenghts_trans = 1 - 2 * magmom_lenghts / element_dependent_scaling
         magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-9)
         #
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
