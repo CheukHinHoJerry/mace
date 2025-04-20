@@ -1026,7 +1026,8 @@ class MagneticRealAgnosticDensityInteractionBlock(MagneticInteractionBlock):
         node_feats = self.linear_up(node_feats)
         # boardcast node feats to number of nodes
         #magmom_inv_feats_i = magmom_node_inv_feats[sender]
-        magmom_inv_feats_j = magmom_node_inv_feats[receiver]
+        #magmom_inv_feats_j = magmom_node_inv_feats[receiver]
+        magmom_inv_feats_j = magmom_node_inv_feats[sender]
         
         edge_feats_with_magmom = torch.cat([edge_feats, magmom_inv_feats_j], dim=-1)
         tp_weights = self.conv_tp_weights(edge_feats_with_magmom)
@@ -1036,7 +1037,7 @@ class MagneticRealAgnosticDensityInteractionBlock(MagneticInteractionBlock):
         )  # [n_edges, irreps]
 
         magmom_mji = self.magmom_conv_tp(
-            node_feats[sender], magmom_node_attrs[receiver], tp_weights
+            node_feats[sender], magmom_node_attrs[sender], tp_weights
         )  # [n_edges, irreps]
         density = scatter_sum(
             src=edge_density, index=receiver, dim=0, dim_size=num_nodes
