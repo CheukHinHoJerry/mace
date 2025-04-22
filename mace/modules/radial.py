@@ -83,9 +83,9 @@ class ChebychevBasis(torch.nn.Module):
         return (
             f"{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis},"
         )
-        
+
 @compile_mode("script")
-class ChebychevBasis2(nn.Module):
+class ChebychevBasis2(torch.nn.Module):
     """
     Fully differentiable Chebyshev basis (T_n) using recurrence.
     Matches behavior of torch.special.chebyshev_polynomial_t(x, n) in shape and interface.
