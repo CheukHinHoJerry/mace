@@ -38,6 +38,26 @@ def compute_forces(
         return torch.zeros_like(positions)
     return -1 * gradient
 
+def compute_mag_forces(
+    energy: torch.Tensor, magmoms: torch.Tensor, training: bool = True
+) -> torch.Tensor:
+    grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
+    #print("energy grad_fn:", energy.grad_fn)
+    #print("magmoms shape: ", magmoms.shape)
+    gradient = torch.autograd.grad(
+        outputs=[energy],  # [n_graphs, ]
+        inputs=[magmoms],  # [n_nodes, 3]
+        grad_outputs=grad_outputs,
+        retain_graph=training,  # Make sure the graph is not destroyed during training
+        create_graph=training,  # Create graph for second derivative
+        allow_unused=True,  # For complete dissociation turn to true
+    )[
+        0
+    ]  # [n_nodes, 3]
+    #print("grad_outputs in mag forces: ", gradient)
+    if gradient is None:
+        return torch.zeros_like(magmoms)
+    return -1 * gradient
 
 def compute_forces_virials(
     energy: torch.Tensor,
@@ -168,17 +188,20 @@ def get_outputs(
     positions: torch.Tensor,
     displacement: Optional[torch.Tensor],
     cell: torch.Tensor,
+    magmoms: Optional[torch.Tensor] = None,
     training: bool = False,
     compute_force: bool = True,
     compute_virials: bool = True,
     compute_stress: bool = True,
     compute_hessian: bool = False,
+    compute_magforces: bool = False,
 ) -> Tuple[
     Optional[torch.Tensor],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
 ]:
+    # Check individual contribution
     if (compute_virials or compute_stress) and displacement is not None:
         forces, virials, stress = compute_forces_virials(
             energy=energy,
@@ -186,14 +209,14 @@ def get_outputs(
             displacement=displacement,
             cell=cell,
             compute_stress=compute_stress,
-            training=(training or compute_hessian),
+            training=(training or compute_hessian or compute_magforces),
         )
     elif compute_force:
         forces, virials, stress = (
             compute_forces(
                 energy=energy,
                 positions=positions,
-                training=(training or compute_hessian),
+                training=(training or compute_hessian or compute_magforces),
             ),
             None,
             None,
@@ -205,7 +228,16 @@ def get_outputs(
         hessian = compute_hessians_vmap(forces, positions)
     else:
         hessian = None
-    return forces, virials, stress, hessian
+    if compute_magforces:
+        assert magmoms is not None, "Magnetic momenet must be inputed to get magnetic forces"
+        mag_forces = compute_mag_forces(
+            energy=energy,
+            magmoms=magmoms,
+            training=(training or compute_hessian or compute_magforces)
+        )
+    else:
+        mag_forces = None
+    return forces, virials, stress, hessian, mag_forces
 
 
 def get_edge_vectors_and_lengths(

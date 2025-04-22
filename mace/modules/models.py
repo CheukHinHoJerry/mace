@@ -33,6 +33,7 @@ from .radial import (
     AgnesiTransform,
     BesselBasis,
     ChebychevBasis,
+    ChebychevBasis2,
     GaussianBasis,
     PolynomialCutoff,
     SoftTransform,
@@ -567,8 +568,8 @@ class MagneticMACE(torch.nn.Module):
         # --- magnetic stuffs ---
         # m_max is not used here but Chebychev is still on (-1, 1)
         # this needs to have a specicies dependent transform
-        self.mag_radial_embedding = ChebychevBasis(
-            r_max = 0,
+        self.mag_radial_embedding = ChebychevBasis2(
+            r_max = 0.0,
             num_basis=num_mag_radial_basis,
         )
 
@@ -726,8 +727,16 @@ class MagneticScaleShiftMACE(MagneticMACE):
         compute_hessian: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
+        #print("positions requires_grad before forward:", data["positions"].requires_grad)
+        #print("magmom requires_grad before forward:", data["magmom"].requires_grad)
         data["positions"].requires_grad_(True)
         data["node_attrs"].requires_grad_(True)
+        data["magmom"].requires_grad_(True)
+        #print("positions requires_grad before forward:", data["positions"].requires_grad)
+        #print("magmom requires_grad before forward:", data["magmom"].requires_grad)
+
+        #print("position is_leaf before forward:", data["positions"].is_leaf)
+        #print("magmom is_leaf before forward:", data["magmom"].is_leaf)
 
         num_graphs = data["ptr"].numel() - 1
         num_atoms_arange = torch.arange(data["positions"].shape[0])
@@ -784,16 +793,27 @@ class MagneticScaleShiftMACE(MagneticMACE):
             pair_node_energy = torch.zeros_like(node_e0)
 
         # --- magnetic stuffs ---
+        
         magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
         element_dependent_scaling = self.m_max[torch.argmax(data["node_attrs"], dim=1)].unsqueeze(-1)
+        element_dependent_scaling.requires_grad_(True)
+        element_dependent_scaling.retain_grad()
+        
         magmom_lenghts_trans = 1 - 2 * magmom_lenghts / element_dependent_scaling
         magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-9)
         #
+        # print('===')
+        # print("magmom_lenghts.requires_grad", magmom_lenghts.requires_grad)
+        # print("element_dependent_scaling.requires_grad", element_dependent_scaling.requires_grad)
+        
+        # print("magmom_lenghts_trans.requires_grad", magmom_lenghts_trans.requires_grad)
+
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
-        magmom_node_attrs = self.mag_spherical_harmonics(magmom_vectors)
-        #print(torch.any(torch.isnan(magmom_node_feats).flatten()))
-        #print(torch.min(magmom_lenghts), torch.max(magmom_lenghts))
-        #print(torch.any(torch.isnan(magmom_node_attrs).flatten()))
+        magmom_node_attrs = self.mag_spherical_harmonics(magmom_vectors)        
+        
+        # print("magmom_node_feats.requires_grad", magmom_node_feats.requires_grad)
+        # print("magmom_node_attrs.requires_grad", magmom_node_attrs.requires_grad)
+
         # Interactions
         node_es_list = [pair_node_energy]
         node_feats_list = []
@@ -801,6 +821,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
         for interaction, product, magmom_product, readout in zip(
             self.interactions, self.products, self.magmom_products, self.readouts
         ):
+            #print("before interaction, magmom_node_feats.requires_grad", magmom_node_feats.requires_grad)
             node_feats, magmom_node_feats, sc, magmom_sc = interaction(
                 node_attrs=data["node_attrs"],
                 node_feats=node_feats,
@@ -810,6 +831,8 @@ class MagneticScaleShiftMACE(MagneticMACE):
                 magmom_node_inv_feats=magmom_node_feats,
                 magmom_node_attrs=magmom_node_attrs
             )
+            #print("after interaction, magmom_node_feats.requires_grad", magmom_node_feats.requires_grad)
+
             node_feats = product(
                 node_feats=node_feats, sc=sc,node_attrs=data["node_attrs"]
             )
@@ -817,11 +840,15 @@ class MagneticScaleShiftMACE(MagneticMACE):
             magmom_node_feats = magmom_product(
                 node_feats=magmom_node_feats, sc=magmom_sc,node_attrs=data["node_attrs"]
             )
+            #print("after product, magmom_node_feats.requires_grad", magmom_node_feats.requires_grad)
+
             node_feats_list.append(node_feats)
             magmom_node_feats_list.append(magmom_node_feats)
             node_es_list.append(
                 readout(node_feats + magmom_node_feats, node_heads)[num_atoms_arange, node_heads]
             )  # {[n_nodes, ], }
+            #print("magmom_node_feats.requires_grad", magmom_node_feats.requires_grad)
+
 
         # Concatenate node features
         node_feats_out = torch.cat(node_feats_list, dim=-1)
@@ -835,26 +862,29 @@ class MagneticScaleShiftMACE(MagneticMACE):
         inter_e = scatter_sum(
             src=node_inter_es, index=data["batch"], dim=-1, dim_size=num_graphs
         )  # [n_graphs,]
-
+        
         # Add E_0 and (scaled) interaction energy
         total_energy = e0 + inter_e
         node_energy = node_e0 + node_inter_es
-        forces, virials, stress, hessian = get_outputs(
+        forces, virials, stress, hessian, mag_forces = get_outputs(
             energy=inter_e,
             positions=data["positions"],
             displacement=displacement,
             cell=data["cell"],
+            magmoms=data["magmom"],
             training=training,
             compute_force=compute_force,
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
+            compute_magforces=True,
         )
         output = {
             "energy": total_energy,
             "node_energy": node_energy,
             "interaction_energy": inter_e,
             "forces": forces,
+            "mag_forces": mag_forces,
             "virials": virials,
             "stress": stress,
             "hessian": hessian,
