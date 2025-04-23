@@ -446,12 +446,15 @@ class UniversalLoss(torch.nn.Module):
                 reduction="mean",
                 delta=self.huber_delta,
             )
-            loss_magforces = torch.nn.functional.huber_loss(
-                configs_magforces_weight * ref["magforces"],
-                configs_magforces_weight * pred["magforces"],
-                reduction="mean",
-                delta=self.huber_delta,
-            )
+            if "magforces" in pred.keys():
+                loss_magforces = torch.nn.functional.huber_loss(
+                    configs_magforces_weight * ref["magforces"],
+                    configs_magforces_weight * pred["magforces"],
+                    reduction="mean",
+                    delta=self.huber_delta,
+                )
+            else:
+                loss_magforces = 0
         return (
             self.energy_weight * loss_energy
             + self.forces_weight * loss_forces
@@ -463,6 +466,7 @@ class UniversalLoss(torch.nn.Module):
         return (
             f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
             f"forces_weight={self.forces_weight:.3f}, stress_weight={self.stress_weight:.3f})"
+            f"magforces={self.magforces_weight:.3f}"
         )
 
 

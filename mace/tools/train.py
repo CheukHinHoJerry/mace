@@ -75,9 +75,9 @@ def valid_err_log(
         error_stress = eval_metrics["rmse_stress"] * 1e3
         errors_magforces = None
         if 'rmse_magf' in eval_metrics.keys():
-            errors_magforces = eval_metrics['rmse_magf']
+            errors_magforces = eval_metrics['rmse_magf'] * 1e3
         msg = f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_stress={error_stress:8.2f} meV / A^3"
-        msg += f", RMSE_magforces={errors_magforces:8.2f} μB / A" if errors_magforces is not None else ""
+        msg += f", RMSE_magforces={errors_magforces:8.2f} meV / μB" if errors_magforces is not None else ""
         logging.info(msg)
     elif (
         log_errors == "PerAtomRMSEstressvirials"
