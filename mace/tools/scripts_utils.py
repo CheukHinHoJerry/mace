@@ -43,6 +43,7 @@ def get_dataset_from_xyz(
     energy_key: str = "REF_energy",
     forces_key: str = "REF_forces",
     stress_key: str = "REF_stress",
+    magforces_key="REF_magforces",
     virials_key: str = "virials",
     dipole_key: str = "dipoles",
     charges_key: str = "charges",

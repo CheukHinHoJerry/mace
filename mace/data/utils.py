@@ -22,6 +22,7 @@ Stress = np.ndarray  # [6, ], [3,3], [9, ]
 Virials = np.ndarray  # [6, ], [3,3], [9, ]
 Charges = np.ndarray  # [..., 1]
 Magmom = np.ndarray  # [..., 3]
+Magforces = np.ndarray # [..., 3]
 Cell = np.ndarray  # [3,3]
 Pbc = tuple  # (3,)
 
@@ -40,6 +41,7 @@ class Configuration:
     dipole: Optional[Vector] = None  # Debye
     charges: Optional[Charges] = None  # atomic unit
     magmom: Optional[Magmom] = None
+    magforces: Optional[Magforces] = None
     cell: Optional[Cell] = None
     pbc: Optional[Pbc] = None
 
@@ -49,6 +51,7 @@ class Configuration:
     stress_weight: float = 1.0  # weight of config stress in loss
     virials_weight: float = 1.0  # weight of config virial in loss
     magmom_weight: float = 1.0  # weight of config virial in loss
+    magforces_weight: float = 1.0  # weight of config virial in loss
     config_type: Optional[str] = DEFAULT_CONFIG_TYPE  # config_type of config
     head: Optional[str] = "Default"  # head used to compute the config
 
@@ -95,6 +98,7 @@ def config_from_atoms_list(
     virials_key="REF_virials",
     dipole_key="REF_dipole",
     charges_key="REF_charges",
+    magforces_key="REF_magforces",
     head_key="head",
     config_type_weights: Optional[Dict[str, float]] = None,
 ) -> Configurations:
@@ -113,6 +117,7 @@ def config_from_atoms_list(
                 virials_key=virials_key,
                 dipole_key=dipole_key,
                 charges_key=charges_key,
+                magforces_key=magforces_key,
                 head_key=head_key,
                 config_type_weights=config_type_weights,
             )
@@ -128,6 +133,7 @@ def config_from_atoms(
     virials_key="REF_virials",
     dipole_key="REF_dipole",
     charges_key="REF_charges",
+    magforces_key="REF_magforces",
     head_key="head",
     config_type_weights: Optional[Dict[str, float]] = None,
 ) -> Configuration:
@@ -141,6 +147,8 @@ def config_from_atoms(
     virials = atoms.info.get(virials_key, None)
     dipole = atoms.info.get(dipole_key, None)  # Debye
     magmom = atoms.arrays.get("dft_magmom", None)
+    magforces = atoms.arrays.get(magforces_key, None)
+    #print("magforces: ", magforces)
     # Charges default to 0 instead of None if not found
     charges = atoms.arrays.get(charges_key, np.zeros(len(atoms)))  # atomic unit
     atomic_numbers = np.array(
@@ -156,6 +164,7 @@ def config_from_atoms(
     forces_weight = atoms.info.get("config_forces_weight", 1.0)
     stress_weight = atoms.info.get("config_stress_weight", 1.0)
     virials_weight = atoms.info.get("config_virials_weight", 1.0)
+    magforces_weight = atoms.info.get("config_magforces_weight", 1.0)
 
     head = atoms.info.get(head_key, "Default")
 
@@ -180,6 +189,7 @@ def config_from_atoms(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
         magmom=magmom,
+        magforces=magforces,
         energy=energy,
         forces=forces,
         stress=stress,
@@ -192,6 +202,7 @@ def config_from_atoms(
         forces_weight=forces_weight,
         stress_weight=stress_weight,
         virials_weight=virials_weight,
+        magforces_weight=magforces_weight,
         config_type=config_type,
         pbc=pbc,
         cell=cell,
@@ -224,6 +235,7 @@ def load_from_xyz(
     virials_key: str = "REF_virials",
     dipole_key: str = "REF_dipole",
     charges_key: str = "REF_charges",
+    magforces_key: str = "REF_magforces",
     head_key: str = "head",
     head_name: str = "Default",
     extract_atomic_energies: bool = False,
@@ -303,6 +315,7 @@ def load_from_xyz(
         virials_key=virials_key,
         dipole_key=dipole_key,
         charges_key=charges_key,
+        magforces_key=magforces_key,
         head_key=head_key,
     )
     return atomic_energies_dict, configs

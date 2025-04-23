@@ -35,6 +35,8 @@ class AtomicData(torch_geometric.data.Data):
     energy: torch.Tensor
     stress: torch.Tensor
     virials: torch.Tensor
+    magmom: torch.Tensor 
+    magforces: torch.Tensor 
     dipole: torch.Tensor
     charges: torch.Tensor
     weight: torch.Tensor
@@ -43,6 +45,7 @@ class AtomicData(torch_geometric.data.Data):
     stress_weight: torch.Tensor
     virials_weight: torch.Tensor
     magmom_weight: torch.Tensor
+    magforces_weight: torch.Tensor
 
     def __init__(
         self,
@@ -59,13 +62,16 @@ class AtomicData(torch_geometric.data.Data):
         stress_weight: Optional[torch.Tensor],  # [,]
         virials_weight: Optional[torch.Tensor],  # [,]
         magmom_weight: Optional[torch.Tensor],  # [,]
+        magforces_weight: Optional[torch.Tensor],  # [,]
         forces: Optional[torch.Tensor],  # [n_nodes, 3]
         energy: Optional[torch.Tensor],  # [, ]
         stress: Optional[torch.Tensor],  # [1,3,3]
         virials: Optional[torch.Tensor],  # [1,3,3]
         dipole: Optional[torch.Tensor],  # [, 3]
         charges: Optional[torch.Tensor],  # [n_nodes, ]
-        magmom: Optional[torch.Tensor] # [n_nodes, 3]
+        magmom: Optional[torch.Tensor], # [n_nodes, 3]
+        magforces: Optional[torch.Tensor]
+
     ):
         # Check shapes
         num_nodes = node_attrs.shape[0]
@@ -81,7 +87,8 @@ class AtomicData(torch_geometric.data.Data):
         assert forces_weight is None or len(forces_weight.shape) == 0
         assert stress_weight is None or len(stress_weight.shape) == 0
         assert virials_weight is None or len(virials_weight.shape) == 0
-        assert magmom_weight is None or len(forces_weight.shape) == 0
+        assert magmom_weight is None or len(magmom_weight.shape) == 0
+        assert magforces_weight is None or len(magforces_weight.shape) == 0
         assert cell is None or cell.shape == (3, 3)
         assert forces is None or forces.shape == (num_nodes, 3)
         assert energy is None or len(energy.shape) == 0
@@ -90,6 +97,7 @@ class AtomicData(torch_geometric.data.Data):
         assert dipole is None or dipole.shape[-1] == 3
         assert charges is None or charges.shape == (num_nodes,)
         assert magmom is None or magmom.shape == (num_nodes, 3)
+        assert magforces is None or magforces.shape == (num_nodes, 3)
 
         # Aggregate data
         data = {
@@ -107,6 +115,7 @@ class AtomicData(torch_geometric.data.Data):
             "stress_weight": stress_weight,
             "virials_weight": virials_weight,
             "magmom_weight": magmom_weight,
+            "magforces_weight": magforces_weight,
             "forces": forces,
             "energy": energy,
             "stress": stress,
@@ -114,6 +123,7 @@ class AtomicData(torch_geometric.data.Data):
             "dipole": dipole,
             "charges": charges,
             "magmom": magmom,
+            "magforces": magforces,
         }
         super().__init__(**data)
 
@@ -184,6 +194,12 @@ class AtomicData(torch_geometric.data.Data):
             else 1
         )
 
+        magforces_weight = (
+            torch.tensor(config.magforces_weight, dtype=torch.get_default_dtype())
+            if config.magforces_weight is not None
+            else 1
+        )
+
 
         forces = (
             torch.tensor(config.forces, dtype=torch.get_default_dtype())
@@ -225,6 +241,12 @@ class AtomicData(torch_geometric.data.Data):
             if config.magmom is not None
             else None
         )
+        magforces = (
+            torch.tensor(config.magforces, dtype=torch.get_default_dtype())
+            if config.magforces is not None
+            else None
+        )
+
         return cls(
             edge_index=torch.tensor(edge_index, dtype=torch.long),
             positions=torch.tensor(config.positions, dtype=torch.get_default_dtype()),
@@ -239,6 +261,7 @@ class AtomicData(torch_geometric.data.Data):
             stress_weight=stress_weight,
             virials_weight=virials_weight,
             magmom_weight=magmom_weight,
+            magforces_weight=magforces_weight,
             forces=forces,
             energy=energy,
             stress=stress,
@@ -246,6 +269,7 @@ class AtomicData(torch_geometric.data.Data):
             dipole=dipole,
             charges=charges,
             magmom=magmom,
+            magforces=magforces,
         )
 
 

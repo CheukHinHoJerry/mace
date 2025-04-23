@@ -737,7 +737,9 @@ class MagneticScaleShiftMACE(MagneticMACE):
 
         #print("position is_leaf before forward:", data["positions"].is_leaf)
         #print("magmom is_leaf before forward:", data["magmom"].is_leaf)
-
+        #print("======")
+        #print(data.keys())
+        #print("======")
         num_graphs = data["ptr"].numel() - 1
         num_atoms_arange = torch.arange(data["positions"].shape[0])
         node_heads = (
@@ -866,7 +868,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
         # Add E_0 and (scaled) interaction energy
         total_energy = e0 + inter_e
         node_energy = node_e0 + node_inter_es
-        forces, virials, stress, hessian, mag_forces = get_outputs(
+        forces, virials, stress, hessian, magforces = get_outputs(
             energy=inter_e,
             positions=data["positions"],
             displacement=displacement,
@@ -884,7 +886,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
             "node_energy": node_energy,
             "interaction_energy": inter_e,
             "forces": forces,
-            "mag_forces": mag_forces,
+            "magforces": magforces,
             "virials": virials,
             "stress": stress,
             "hessian": hessian,
