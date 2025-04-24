@@ -646,7 +646,7 @@ class MagneticMACE(torch.nn.Module):
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
-                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                magmom_node_inv_feats_irreps=hidden_irreps, #o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
                 magmom_node_attrs_irreps=magmom_sh_irreps
             )
             self.interactions.append(inter)
@@ -882,7 +882,6 @@ class MagneticScaleShiftMACE(MagneticMACE):
             "displacement": displacement,
             "node_feats": node_feats_out,
         }
-        #print("total energy: ", total_energy)
         return output
 
 class BOTNet(torch.nn.Module):

@@ -650,6 +650,7 @@ def get_loss_fn(
             energy_weight=args.energy_weight,
             forces_weight=args.forces_weight,
             stress_weight=args.stress_weight,
+            magforces_weight=args.magforces_weight,
             huber_delta=args.huber_delta,
         )
     elif args.loss == "dipole":

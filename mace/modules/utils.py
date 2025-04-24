@@ -224,6 +224,43 @@ def compute_forces_virials_magforces(
 
     return -forces, -virials, stress, -mag_forces if mag_forces is not None else None
 
+import torch
+from typing import Tuple, Optional
+
+def compute_forces_magforces(
+    energy: torch.Tensor,
+    positions: torch.Tensor,
+    magmoms: Optional[torch.Tensor] = None,
+    training: bool = True,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Compute atomic forces and magnetic forces in a single autograd pass.
+
+    Returns:
+        -forces: dE/d(positions)
+        -mag_forces: dE/d(magmoms), or None if magmoms not provided
+    """
+    grad_outputs = [torch.ones_like(energy)]
+    inputs = [positions]
+    if magmoms is not None:
+        inputs.append(magmoms)
+
+    grads = torch.autograd.grad(
+        outputs=[energy],
+        inputs=inputs,
+        grad_outputs=grad_outputs,
+        retain_graph=training,
+        create_graph=training,
+        allow_unused=True,
+    )
+
+    forces = grads[0] if grads[0] is not None else torch.zeros_like(positions)
+    mag_forces = grads[1] if magmoms is not None and grads[1] is not None else (
+        torch.zeros_like(magmoms) if magmoms is not None else None
+    )
+
+    return -forces, -mag_forces if mag_forces is not None else None
+
 def get_outputs(
     energy: torch.Tensor,
     positions: torch.Tensor,
@@ -242,7 +279,7 @@ def get_outputs(
     Optional[torch.Tensor],
     Optional[torch.Tensor],
 ]:
-    # Check individual contribution
+    
     if ((compute_virials or compute_stress) and displacement is not None) and compute_magforces:
         assert magmoms is not None, "Magnetic momenet must be inputed to get magnetic forces"
         forces, virials, stress, mag_forces = compute_forces_virials_magforces(
@@ -251,7 +288,7 @@ def get_outputs(
             displacement=displacement,
             cell=cell,
             magmoms=magmoms,
-            training=True,
+            training=(training or compute_hessian),
             compute_stress=True
         )
     elif (compute_virials or compute_stress) and displacement is not None:
@@ -261,15 +298,24 @@ def get_outputs(
             displacement=displacement,
             cell=cell,
             compute_stress=compute_stress,
-            training=(training or compute_hessian or compute_magforces),
+            training=(training or compute_hessian),
         )
         mag_forces = None
+    elif compute_force and compute_magforces:
+        assert magmoms is not None, "Magnetic momenet must be inputed to get magnetic forces"
+        forces, mag_forces = compute_forces_magforces(
+                                            energy=energy,
+                                            positions=positions,
+                                            magmoms=magmoms,
+                                            training=(training or compute_hessian),
+                                            )
+        virials, stress = None, None
     elif compute_force:
         forces, virials, stress = (
             compute_forces(
                 energy=energy,
                 positions=positions,
-                training=(training or compute_hessian or compute_magforces),
+                training=(training or compute_hessian),
             ),
             None,
             None,
@@ -283,15 +329,6 @@ def get_outputs(
         hessian = compute_hessians_vmap(forces, positions)
     else:
         hessian = None
-    # if compute_magforces:
-    #     assert magmoms is not None, "Magnetic momenet must be inputed to get magnetic forces"
-    #     mag_forces = compute_mag_forces(
-    #         energy=energy,
-    #         magmoms=magmoms,
-    #         training=(training or compute_hessian or compute_magforces)
-    #     )
-    # else:
-    #     mag_forces = None
     return forces, virials, stress, hessian, mag_forces
 
 

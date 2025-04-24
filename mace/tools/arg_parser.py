@@ -544,6 +544,17 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         dest="swa_forces_weight",
     )
     parser.add_argument(
+        "--magforces_weight", help="weight of mag forces loss", type=float, default=100.0
+    )
+    parser.add_argument(
+        "--swa_magforces_weight",
+        "--stage_two_magforces_weight",
+        help="weight of magforces loss after starting Stage Two (previously called swa)",
+        type=float,
+        default=100.0,
+        dest="swa_magforces_weight",
+    )
+    parser.add_argument(
         "--energy_weight", help="weight of energy loss", type=float, default=1.0
     )
     parser.add_argument(
