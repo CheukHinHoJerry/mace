@@ -727,19 +727,10 @@ class MagneticScaleShiftMACE(MagneticMACE):
         compute_hessian: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
-        #print("positions requires_grad before forward:", data["positions"].requires_grad)
-        #print("magmom requires_grad before forward:", data["magmom"].requires_grad)
         data["positions"].requires_grad_(True)
         data["node_attrs"].requires_grad_(True)
         data["magmom"].requires_grad_(True)
-        #print("positions requires_grad before forward:", data["positions"].requires_grad)
-        #print("magmom requires_grad before forward:", data["magmom"].requires_grad)
-
-        #print("position is_leaf before forward:", data["positions"].is_leaf)
-        #print("magmom is_leaf before forward:", data["magmom"].is_leaf)
-        #print("======")
-        #print(data.keys())
-        #print("======")
+        
         num_graphs = data["ptr"].numel() - 1
         num_atoms_arange = torch.arange(data["positions"].shape[0])
         node_heads = (
@@ -801,21 +792,19 @@ class MagneticScaleShiftMACE(MagneticMACE):
         element_dependent_scaling.requires_grad_(True)
         element_dependent_scaling.retain_grad()
         
-        magmom_lenghts_trans = 1 - 2 * magmom_lenghts / element_dependent_scaling
+        magmom_lenghts_trans = 1 - 2 * (magmom_lenghts / element_dependent_scaling) ** 2
         magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-9)
+        
+        # Compute the spherical harmonics from the normalized vectors
+        magmom_node_attrs_raw = self.mag_spherical_harmonics(magmom_vectors)
+
+        # Replace output with 1 when the magnitude is 0, preserving gradient flow
+        is_zero_mag = (magmom_lenghts < 1e-8).view(-1, *[1]*(magmom_node_attrs_raw.ndim - 1))  # shape broadcast
+        magmom_node_attrs = torch.where(is_zero_mag, torch.ones_like(magmom_node_attrs_raw), magmom_node_attrs_raw)
+
         #
-        # print('===')
-        # print("magmom_lenghts.requires_grad", magmom_lenghts.requires_grad)
-        # print("element_dependent_scaling.requires_grad", element_dependent_scaling.requires_grad)
-        
-        # print("magmom_lenghts_trans.requires_grad", magmom_lenghts_trans.requires_grad)
-
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
-        magmom_node_attrs = self.mag_spherical_harmonics(magmom_vectors)        
         
-        # print("magmom_node_feats.requires_grad", magmom_node_feats.requires_grad)
-        # print("magmom_node_attrs.requires_grad", magmom_node_attrs.requires_grad)
-
         # Interactions
         node_es_list = [pair_node_energy]
         node_feats_list = []

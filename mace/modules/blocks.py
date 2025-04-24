@@ -955,6 +955,9 @@ class MagneticRealAgnosticDensityInteractionBlock(MagneticInteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
         )
+        print("node_feats_irreps: ", self.node_feats_irreps)
+        print("magmom_node_attrs_irreps: ", self.magmom_node_attrs_irreps)
+        print("magmom_irreps_mid: ", magmom_irreps_mid)
 
         # Convolution weights 
         # fix later
@@ -1022,16 +1025,22 @@ class MagneticRealAgnosticDensityInteractionBlock(MagneticInteractionBlock):
     ) -> Tuple[torch.Tensor, None]:
         sender = edge_index[0]
         receiver = edge_index[1]
+        #print("edge index shape: ", edge_index.shape)
+        #print("magmom_node_attrs: ", magmom_node_attrs)
         num_nodes = node_feats.shape[0]
         node_feats = self.linear_up(node_feats)
+
         # boardcast node feats to number of nodes
-        #magmom_inv_feats_i = magmom_node_inv_feats[sender]
-        #magmom_inv_feats_j = magmom_node_inv_feats[receiver]
         magmom_inv_feats_j = magmom_node_inv_feats[sender]
         
         edge_feats_with_magmom = torch.cat([edge_feats, magmom_inv_feats_j], dim=-1)
+
+        # combined learnable radial
         tp_weights = self.conv_tp_weights(edge_feats_with_magmom)
+
+        # density normalization
         edge_density = torch.tanh(self.density_fn(edge_feats) ** 2)
+
         mji = self.conv_tp(
             node_feats[sender], edge_attrs, tp_weights
         )  # [n_edges, irreps]
@@ -1039,24 +1048,31 @@ class MagneticRealAgnosticDensityInteractionBlock(MagneticInteractionBlock):
         magmom_mji = self.magmom_conv_tp(
             node_feats[sender], magmom_node_attrs[sender], tp_weights
         )  # [n_edges, irreps]
+        
         density = scatter_sum(
             src=edge_density, index=receiver, dim=0, dim_size=num_nodes
         )  # [n_nodes, 1]
 
-        #
+        # highlighted message for central message
+
         message = scatter_sum(
             src=mji, index=receiver, dim=0, dim_size=num_nodes
         )  # [n_nodes, irreps]
-
+        # print("magmom_mji[receiver == 0, :] : ", magmom_mji[receiver == 0, :])
+        # print("magmom_mji[receiver == 1, :] : ", magmom_mji[receiver == 1, :])
+        # print("magmom_mji[receiver == 2, :] : ", magmom_mji[receiver == 2, :])
         magmom_message = scatter_sum(
             src=magmom_mji, index=receiver, dim = 0, dim_size=num_nodes,
         )
-
+        # print("magmom_message 0: ", magmom_message[0, :])
+        # print("magmom_message 1: ", magmom_message[1, :])
+        # print("magmom_message 2: ", magmom_message[2, :])
         message = self.linear(message) / (density + 1)
         message = self.skip_tp(message, node_attrs)
         # not doing density normalization for now
-        magmom_message = self.magmom_linear(message) / self.avg_num_neighbors
-        magmom_message = self.magmom_skip_tp(message, node_attrs)
+        magmom_message = self.magmom_linear(magmom_message) / self.avg_num_neighbors
+        magmom_message = self.magmom_skip_tp(magmom_message, node_attrs)
+        
         return (
             self.reshape(message),
             self.reshape(magmom_message),
