@@ -446,7 +446,7 @@ class UniversalLoss(torch.nn.Module):
                 reduction="mean",
                 delta=self.huber_delta,
             )
-            if "magforces" in pred.keys():
+            if "magforces" in pred.keys() and (pred["magforces"] is not None and ref["magforces"] is not None):
                 loss_magforces = torch.nn.functional.huber_loss(
                     configs_magforces_weight * ref["magforces"],
                     configs_magforces_weight * pred["magforces"],
