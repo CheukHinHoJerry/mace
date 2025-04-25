@@ -125,7 +125,8 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "ScaleShiftBOTNet",
             "AtomicDipolesMACE",
             "EnergyDipolesMACE",
-            "MagneticScaleShiftMACE"
+            "MagneticScaleShiftMACE",
+            "MagneticSolidHarmonicsScaleShiftMACE"
         ],
     )
     parser.add_argument(
@@ -174,6 +175,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
             "MagneticRealAgnosticDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -187,6 +189,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
             "MagneticRealAgnosticDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityInteractionBlock",
         ],
     )
     parser.add_argument(

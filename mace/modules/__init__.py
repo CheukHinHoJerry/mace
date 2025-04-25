@@ -20,6 +20,7 @@ from .blocks import (
     RealAgnosticInteractionBlock,
     RealAgnosticResidualInteractionBlock,
     MagneticRealAgnosticDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialDensityInteractionBlock,
     ResidualElementDependentInteractionBlock,
     ScaleShiftBlock,
 )
@@ -40,7 +41,9 @@ from .models import (
     EnergyDipolesMACE,
     ScaleShiftBOTNet,
     ScaleShiftMACE,
-    MagneticScaleShiftMACE
+    #
+    MagneticScaleShiftMACE,
+    MagneticSolidHarmonicsScaleShiftMACE
 )
 from .radial import BesselBasis, GaussianBasis, PolynomialCutoff, ZBLBasis
 from .symmetric_contraction import SymmetricContraction
@@ -62,7 +65,8 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "RealAgnosticInteractionBlock": RealAgnosticInteractionBlock,
     "RealAgnosticDensityInteractionBlock": RealAgnosticDensityInteractionBlock,
     "RealAgnosticDensityResidualInteractionBlock": RealAgnosticDensityResidualInteractionBlock,
-    "MagneticRealAgnosticDensityInteractionBlock": MagneticRealAgnosticDensityInteractionBlock
+    "MagneticRealAgnosticDensityInteractionBlock": MagneticRealAgnosticDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialDensityInteractionBlock": MagneticRealAgnosticSeparateRadialDensityInteractionBlock,
 }
 
 scaling_classes: Dict[str, Callable] = {
@@ -100,6 +104,7 @@ __all__ = [
     "AtomicDipolesMACE",
     "EnergyDipolesMACE",
     "MagneticScaleShiftMACE",
+    "MagneticSolidHarmonicsScaleShiftMACE",
     "WeightedEnergyForcesLoss",
     "WeightedForcesLoss",
     "WeightedEnergyForcesVirialsLoss",
