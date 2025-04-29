@@ -14,6 +14,13 @@ from e3nn.util.jit import compile_mode
 from mace.data import AtomicData
 from mace.modules.radial import ZBLBasis
 from mace.tools.scatter import scatter_sum
+from mace.tools import (
+    AtomicNumberTable,
+    atomic_numbers_to_indices,
+    to_one_hot,
+    torch_geometric,
+    voigt_to_matrix,
+)
 
 from .blocks import (
     AtomicEnergiesBlock,
@@ -339,10 +346,28 @@ class ScaleShiftMACE(MACE):
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
 
+    def compute_one_hot_atomic_numbers(self, atomic_numbers: torch.Tensor, z_table_zs: torch.Tensor) -> torch.Tensor:
+        """
+        Compute one-hot encoding of atomic numbers based on z_table.
+
+        Args:
+            atomic_numbers (torch.Tensor): Shape (n_atoms,)
+            z_table_zs (torch.Tensor): Shape (n_species,)
+
+        Returns:
+            torch.Tensor: One-hot tensor of shape (n_atoms, n_species)
+        """
+        # atomic_numbers: (n_atoms,)
+        # z_table_zs: (n_species,)
+        # Create mapping: for each atomic number, find its index in z_table
+        idx = (atomic_numbers.unsqueeze(1) == z_table_zs.unsqueeze(0)).nonzero(as_tuple=False)[:, 1]
+        one_hot = torch.nn.functional.one_hot(idx, num_classes=z_table_zs.shape[0]).float()
+        return one_hot
+
     def forward(
         self,
         data: Dict[str, torch.Tensor],
-        training: bool = False,
+        training: bool = True,
         compute_force: bool = True,
         compute_virials: bool = False,
         compute_stress: bool = False,
@@ -350,8 +375,15 @@ class ScaleShiftMACE(MACE):
         compute_hessian: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
+        #z_table = AtomicNumberTable(self.atomic_numbers)
+        #one_hot = self.compute_one_hot_atomic_numbers(data["atomic_numbers"], z_table.zs)
+        
+        # compute one hot
+        #data["node_attrs"] = one_hot
         data["positions"].requires_grad_(True)
         data["node_attrs"].requires_grad_(True)
+        #data["batch"] = 
+
         num_graphs = data["ptr"].numel() - 1
         num_atoms_arange = torch.arange(data["positions"].shape[0])
         node_heads = (
