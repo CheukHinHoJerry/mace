@@ -126,7 +126,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "AtomicDipolesMACE",
             "EnergyDipolesMACE",
             "MagneticScaleShiftMACE",
-            "MagneticSolidHarmonicsScaleShiftMACE"
+            "MagneticSolidHarmonicsScaleShiftMACE",
+            "MagneticSolidHarmonicsSeparateReadoutScaleShiftMACE",
+            "MagneticSolidHarmonicsSeparateReadoutMixMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE",
+            "MagneticSolidHarmonicsFlexibleSOScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -176,6 +181,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityResidualInteractionBlock",
             "MagneticRealAgnosticDensityInteractionBlock",
             "MagneticRealAgnosticSeparateRadialDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -190,6 +201,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityResidualInteractionBlock",
             "MagneticRealAgnosticDensityInteractionBlock",
             "MagneticRealAgnosticSeparateRadialDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(

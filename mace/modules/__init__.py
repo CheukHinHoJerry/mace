@@ -21,6 +21,11 @@ from .blocks import (
     RealAgnosticResidualInteractionBlock,
     MagneticRealAgnosticDensityInteractionBlock,
     MagneticRealAgnosticSeparateRadialDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock,
+    MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock,
     ResidualElementDependentInteractionBlock,
     ScaleShiftBlock,
 )
@@ -43,7 +48,12 @@ from .models import (
     ScaleShiftMACE,
     #
     MagneticScaleShiftMACE,
-    MagneticSolidHarmonicsScaleShiftMACE
+    MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE,
+    MagneticSolidHarmonicsScaleShiftMACE,
+    MagneticSolidHarmonicsSeparateReadoutScaleShiftMACE,
+    MagneticSolidHarmonicsSeparateReadoutMixMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsFlexibleSOScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE,
 )
 from .radial import BesselBasis, GaussianBasis, PolynomialCutoff, ZBLBasis
 from .symmetric_contraction import SymmetricContraction
@@ -67,6 +77,11 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "RealAgnosticDensityResidualInteractionBlock": RealAgnosticDensityResidualInteractionBlock,
     "MagneticRealAgnosticDensityInteractionBlock": MagneticRealAgnosticDensityInteractionBlock,
     "MagneticRealAgnosticSeparateRadialDensityInteractionBlock": MagneticRealAgnosticSeparateRadialDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock": MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock": MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock": MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock,
 }
 
 scaling_classes: Dict[str, Callable] = {
@@ -105,6 +120,7 @@ __all__ = [
     "EnergyDipolesMACE",
     "MagneticScaleShiftMACE",
     "MagneticSolidHarmonicsScaleShiftMACE",
+    "MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE",
     "WeightedEnergyForcesLoss",
     "WeightedForcesLoss",
     "WeightedEnergyForcesVirialsLoss",

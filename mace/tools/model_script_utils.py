@@ -192,8 +192,98 @@ def _determine_atomic_inter_shift(mean, heads):
 def _build_model(
     args, model_config, model_config_foundation, heads
 ):  # pylint: disable=too-many-return-statements
-    
-    if args.model == "MagneticSolidHarmonicsScaleShiftMACE":
+
+    if args.model == "MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE":
+        return modules.MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=args.mean,
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=args.m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+        )
+    elif args.model == "MagneticSolidHarmonicsFlexibleSOScaleShiftMACE":
+        return modules.MagneticSolidHarmonicsFlexibleSOScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=args.mean,
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=args.m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+        )
+    elif args.model == "MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE":
+        return modules.MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=args.mean,
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=args.m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+        )
+    elif args.model == "MagneticSolidHarmonicsSeparateReadoutMixMagmomScaleShiftMACE":
+        return modules.MagneticSolidHarmonicsSeparateReadoutMixMagmomScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=args.mean,
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=args.m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+        )
+    elif args.model == "MagneticSolidHarmonicsSeparateReadoutScaleShiftMACE":
+        return modules.MagneticSolidHarmonicsSeparateReadoutScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=args.mean,
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=args.m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+        )
+    elif args.model == "MagneticSolidHarmonicsScaleShiftMACE":
         return modules.MagneticSolidHarmonicsScaleShiftMACE(
             **model_config,
             pair_repulsion=args.pair_repulsion,

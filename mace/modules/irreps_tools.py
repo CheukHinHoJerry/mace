@@ -45,6 +45,36 @@ def tp_out_irreps_with_instructions(
 
     return irreps_out, instructions
 
+def tp_out_irreps_with_instructions_magmom(
+    irreps1: o3.Irreps, irreps2: o3.Irreps, target_irreps: o3.Irreps
+) -> Tuple[o3.Irreps, List]:
+    trainable = True
+
+    # Collect possible irreps and their instructions
+    irreps_out_list: List[Tuple[int, o3.Irreps]] = []
+    instructions = []
+    for i, (mul, ir_in) in enumerate(irreps1):
+        for j, (_, ir_edge) in enumerate(irreps2):
+            for ir_out in ir_in * ir_edge:  # | l1 - l2 | <= l <= l1 + l2
+                if ir_out in target_irreps:
+                    k = len(irreps_out_list)  # instruction index
+                    irreps_out_list.append((mul, ir_out))
+                    instructions.append((i, j, k, "uvu", trainable))
+
+    # We sort the output irreps of the tensor product so that we can simplify them
+    # when they are provided to the second o3.Linear
+    irreps_out = o3.Irreps(irreps_out_list)
+    irreps_out, permut, _ = irreps_out.sort()
+
+    # Permute the output indexes of the instructions to match the sorted irreps:
+    instructions = [
+        (i_in1, i_in2, permut[i_out], mode, train)
+        for i_in1, i_in2, i_out, mode, train in instructions
+    ]
+
+    instructions = sorted(instructions, key=lambda x: x[2])
+
+    return irreps_out, instructions
 
 def linear_out_irreps(irreps: o3.Irreps, target_irreps: o3.Irreps) -> o3.Irreps:
     # Assuming simplified irreps
@@ -107,6 +137,27 @@ class reshape_irreps(torch.nn.Module):
                 return torch.cat(out, dim=-1)
         return torch.cat(out, dim=-1)
 
+@compile_mode("script")
+class inverse_reshape_irreps(torch.nn.Module):
+    def __init__(self, irreps: o3.Irreps) -> None:
+        super().__init__()
+        self.irreps = o3.Irreps(irreps)
+        self.dims = []
+        self.muls = []
+        for mul, ir in self.irreps:
+            d = ir.dim
+            self.dims.append(d)
+            self.muls.append(mul)
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        out = []
+        dsum = 0
+        for mul, d in zip(self.muls, self.dims):
+            field = tensor[:,:,dsum:dsum+d]  # [batch, mul, repr]
+            field = field.reshape(tensor.shape[0], -1)  # Flatten [batch, mul * repr]
+            dsum += d
+            out.append(field)
+        return torch.cat(out, dim=-1)
 
 def mask_head(x: torch.Tensor, head: torch.Tensor, num_heads: int) -> torch.Tensor:
     mask = torch.zeros(x.shape[0], x.shape[1] // num_heads, num_heads, device=x.device)
