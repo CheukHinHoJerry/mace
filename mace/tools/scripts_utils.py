@@ -286,8 +286,9 @@ def print_git_commit():
 
 
 def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
-    if model.__class__.__name__ != "ScaleShiftMACE":
-        return {"error": "Model is not a ScaleShiftMACE model"}
+    # if model.__class__.__name__ != "ScaleShiftMACE":
+    #     print("error: Model is not a ScaleShiftMACE model")
+    #     return {"error": "Model is not a ScaleShiftMACE model"}
 
     def radial_to_name(radial_type):
         if radial_type == "BesselBasis":
@@ -310,18 +311,40 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
     scale = model.scale_shift.scale
     shift = model.scale_shift.shift
     heads = model.heads if hasattr(model, "heads") else ["default"]
+    
     model_mlp_irreps = (
         o3.Irreps(str(model.readouts[-1].hidden_irreps))
         if model.num_interactions.item() > 1
         else 1
     )
-    mlp_irreps = o3.Irreps(f"{model_mlp_irreps.count((0, 1)) // len(heads)}x0e")
+    
+    if model.num_interactions.item() > 1:
+        mlp_irreps = o3.Irreps(f"{model_mlp_irreps.count((0, 1)) // len(heads)}x0e")
+    else:
+        mlp_irreps = 1
+
     try:
         correlation = (
             len(model.products[0].symmetric_contractions.contractions[0].weights) + 1
         )
     except AttributeError:
         correlation = model.products[0].symmetric_contractions.contraction_degree
+    
+    # manual 
+    contraction_cls = "SymmetricContraction"
+    contraction_cls_first = "SymmetricContraction"
+
+    # for magnetic mace
+    m_max = getattr(model, "m_max", None)
+    num_mag_radial_basis = getattr(getattr(model, "mag_radial_embedding", None), "num_basis", None)
+    try:
+        max_m_ell = int(model.mag_solid_harmoics.SH.l_max())
+    except (AttributeError, TypeError):
+        max_m_ell = None
+
+    ##
+    print("mlp_irreps: ", mlp_irreps)
+    
     config = {
         "r_max": model.r_max.item(),
         "num_bessel": len(model.radial_embedding.bessel_fn.bessel_weights),
@@ -353,6 +376,12 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "atomic_inter_scale": scale.cpu().numpy(),
         "atomic_inter_shift": shift.cpu().numpy(),
         "heads": heads,
+        ## for magnetic mace
+        "m_max": m_max,
+        "num_mag_radial_basis": num_mag_radial_basis,
+        "max_m_ell": max_m_ell,
+        "contraction_cls": "SymmetricContraction",
+        "contraction_cls_first": "SymmetricContraction",
     }
     return config
 

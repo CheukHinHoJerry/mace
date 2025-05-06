@@ -29,26 +29,38 @@ def get_transfer_keys() -> List[str]:
             f"interactions.{j}.skip_tp.weight",
             f"products.{j}.linear.weight",
         ]
+    ] + [
+        s
+        for j in range(2)
+            for s in [
+                f"interactions.{j}.magmom_linear.weight",
+                f"interactions.{j}.magmom_skip_tp.weight",
+            ]
     ]
 
 
-def get_kmax_pairs(max_L: int, correlation: int) -> List[Tuple[int, int]]:
+def get_kmax_pairs(max_L: int, correlation: int, num_interactions: int) -> List[Tuple[int, int]]:
     """Determine kmax pairs based on max_L and correlation"""
+    if num_interactions == 1:
+        if correlation == 2:
+            raise NotImplementedError("Correlation 2 not supported yet")    
+        else:
+            return [[0, max_L]]
     if correlation == 2:
         raise NotImplementedError("Correlation 2 not supported yet")
     if correlation == 3:
         return [[0, max_L], [1, 0]]
     raise NotImplementedError(f"Correlation {correlation} not supported")
 
-
 def transfer_symmetric_contractions(
     source_dict: Dict[str, torch.Tensor],
     target_dict: Dict[str, torch.Tensor],
     max_L: int,
     correlation: int,
+    num_interactions: int,
 ):
     """Transfer symmetric contraction weights"""
-    kmax_pairs = get_kmax_pairs(max_L, correlation)
+    kmax_pairs = get_kmax_pairs(max_L, correlation, num_interactions)
 
     for i, kmax in kmax_pairs:
         wm = torch.concatenate(
@@ -69,6 +81,7 @@ def transfer_weights(
     target_model: torch.nn.Module,
     max_L: int,
     correlation: int,
+    num_interactions: int,
 ):
     """Transfer weights with proper remapping"""
     # Get source state dict
@@ -84,7 +97,7 @@ def transfer_weights(
             logging.warning(f"Key {key} not found in source model")
 
     # Transfer symmetric contractions
-    transfer_symmetric_contractions(source_dict, target_dict, max_L, correlation)
+    transfer_symmetric_contractions(source_dict, target_dict, max_L, correlation, num_interactions)
 
     # Unsqueeze linear and skip_tp layers
     for key in source_dict.keys():
@@ -107,7 +120,7 @@ def transfer_weights(
                     f"source {source_dict[key].shape} vs target {target_dict[key].shape}"
                 )
     # Transfer avg_num_neighbors
-    for i in range(2):
+    for i in range(num_interactions):
         target_model.interactions[i].avg_num_neighbors = source_model.interactions[
             i
         ].avg_num_neighbors
@@ -139,6 +152,7 @@ def run(
     # Get max_L and correlation from config
     max_L = config["hidden_irreps"].lmax
     correlation = config["correlation"]
+    num_interactions = config["num_interactions"]
 
     # Add cuequivariance config
     config["cueq_config"] = CuEquivarianceConfig(
@@ -153,7 +167,7 @@ def run(
     target_model = source_model.__class__(**config).to(device)
 
     # Transfer weights with proper remapping
-    transfer_weights(source_model, target_model, max_L, correlation)
+    transfer_weights(source_model, target_model, max_L, correlation, num_interactions)
 
     if return_model:
         return target_model
