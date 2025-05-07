@@ -8,7 +8,7 @@ import torch
 from mace.tools.scripts_utils import extract_config_mace_model
 
 
-def get_transfer_keys() -> List[str]:
+def get_transfer_keys(num_layers: int) -> List[str]:
     """Get list of keys that need to be transferred"""
     return [
         "node_embedding.linear.weight",
@@ -20,7 +20,7 @@ def get_transfer_keys() -> List[str]:
         *[f"readouts.1.linear_{i}.weight" for i in range(1, 3)],
     ] + [
         s
-        for j in range(2)
+        for j in range(num_layers)
         for s in [
             f"interactions.{j}.linear_up.weight",
             *[f"interactions.{j}.conv_tp_weights.layer{i}.weight" for i in range(4)],
@@ -30,7 +30,7 @@ def get_transfer_keys() -> List[str]:
         ]
     ] + [
         s
-        for j in range(2)
+        for j in range(num_layers)
             for s in [
                 f"interactions.{j}.magmom_linear.weight",
                 f"interactions.{j}.magmom_skip_tp.weight",
@@ -38,9 +38,9 @@ def get_transfer_keys() -> List[str]:
     ]
 
 
-def get_kmax_pairs(max_L: int, correlation: int, num_interactions: int) -> List[Tuple[int, int]]:
+def get_kmax_pairs(max_L: int, correlation: int, num_layers: int) -> List[Tuple[int, int]]:
     """Determine kmax pairs based on max_L and correlation"""
-    if num_interactions == 1:
+    if num_layers == 1:
         if correlation == 2:
             raise NotImplementedError("Correlation 2 not supported yet")    
         else:
@@ -57,10 +57,10 @@ def transfer_symmetric_contractions(
     target_dict: Dict[str, torch.Tensor],
     max_L: int,
     correlation: int,
-    num_interactions: int,
+    num_layers: int,
 ):
     """Transfer symmetric contraction weights from CuEq to E3nn format"""
-    kmax_pairs = get_kmax_pairs(max_L, correlation, num_interactions)
+    kmax_pairs = get_kmax_pairs(max_L, correlation, num_layers)
 
     for i, kmax in kmax_pairs:
         # Get the combined weight tensor from source
@@ -97,7 +97,7 @@ def transfer_weights(
     target_model: torch.nn.Module,
     max_L: int,
     correlation: int,
-    num_interactions: int,
+    num_layers: int,
 ):
     """Transfer weights from CuEq to E3nn format"""
     # Get state dicts
@@ -105,7 +105,7 @@ def transfer_weights(
     target_dict = target_model.state_dict()
 
     # Transfer main weights
-    transfer_keys = get_transfer_keys()
+    transfer_keys = get_transfer_keys(num_layers)
     for key in transfer_keys:
         if key in source_dict:  # Check if key exists
             target_dict[key] = source_dict[key]
@@ -113,7 +113,7 @@ def transfer_weights(
             logging.warning(f"Key {key} not found in source model")
 
     # Transfer symmetric contractions
-    transfer_symmetric_contractions(source_dict, target_dict, max_L, correlation, num_interactions)
+    transfer_symmetric_contractions(source_dict, target_dict, max_L, correlation, num_layers)
 
     # Unsqueeze linear and skip_tp layers
     for key in source_dict.keys():
@@ -139,7 +139,7 @@ def transfer_weights(
                 )
 
     # Transfer avg_num_neighbors
-    for i in range(num_interactions):
+    for i in range(num_layers):
         target_model.interactions[i].avg_num_neighbors = source_model.interactions[
             i
         ].avg_num_neighbors
@@ -163,7 +163,7 @@ def run(input_model, output_model="_e3nn.model", device="cpu", return_model=True
     # Get max_L and correlation from config
     max_L = config["hidden_irreps"].lmax
     correlation = config["correlation"]
-    num_interactions = config["num_interactions"]
+    num_layers = config["num_interactions"]
 
     # Remove CuEq config
     config.pop("cueq_config", None)
@@ -173,7 +173,7 @@ def run(input_model, output_model="_e3nn.model", device="cpu", return_model=True
     target_model = source_model.__class__(**config)
 
     # Transfer weights with proper remapping
-    transfer_weights(source_model, target_model, max_L, correlation, num_interactions)
+    transfer_weights(source_model, target_model, max_L, correlation, num_layers)
 
     if return_model:
         return target_model
