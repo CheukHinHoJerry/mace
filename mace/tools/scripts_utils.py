@@ -43,10 +43,11 @@ def get_dataset_from_xyz(
     energy_key: str = "REF_energy",
     forces_key: str = "REF_forces",
     stress_key: str = "REF_stress",
-    magforces_key="REF_magforces",
     virials_key: str = "virials",
     dipole_key: str = "dipoles",
     charges_key: str = "charges",
+    magmom_key: str = "magmom",
+    magforces_key="REF_magforces",
     head_key: str = "head",
 ) -> Tuple[SubsetCollection, Optional[Dict[int, float]]]:
     """
@@ -101,13 +102,15 @@ def get_dataset_from_xyz(
     for i, path in enumerate(train_paths):
         logging.debug("Loading training file: %s", path)
         logging.debug(
-            "Using keys: energy=%s, forces=%s, stress=%s, virials=%s, dipole=%s, charges=%s",
+            "Using keys: energy=%s, forces=%s, stress=%s, virials=%s, dipole=%s, charges=%s, magmom=%s, magforces_key=%s",
             energy_key,
             forces_key,
             stress_key,
             virials_key,
             dipole_key,
             charges_key,
+            magmom_key,
+            magforces_key,
         )
         ae_dict, train_configs = data.load_from_xyz(
             file_path=path,
@@ -118,6 +121,8 @@ def get_dataset_from_xyz(
             virials_key=virials_key,
             dipole_key=dipole_key,
             charges_key=charges_key,
+            magmom_key=magmom_key,
+            magforces_key=magforces_key,
             head_key=head_key,
             extract_atomic_energies=True,  # Extract from all files to average
             keep_isolated_atoms=keep_isolated_atoms,
@@ -162,6 +167,8 @@ def get_dataset_from_xyz(
                 virials_key=virials_key,
                 dipole_key=dipole_key,
                 charges_key=charges_key,
+                magmom_key=magmom_key,
+                magforces_key=magforces_key,
                 head_key=head_key,
                 extract_atomic_energies=False,
                 head_name=head_name,
@@ -196,7 +203,7 @@ def get_dataset_from_xyz(
             f"{np.sum([1 if getattr(config, 'forces', None) is not None else 0 for config in valid_configs])} forces, "
             f"{np.sum([1 if getattr(config, 'stress', None) is not None else 0 for config in valid_configs])} stresses]"
         )
-
+    
     # Process test files if provided
     test_configs_by_type = []
     if test_paths:
@@ -210,6 +217,8 @@ def get_dataset_from_xyz(
                 stress_key=stress_key,
                 virials_key=virials_key,
                 charges_key=charges_key,
+                magmom_key=magmom_key,
+                magforces_key=magforces_key,
                 head_key=head_key,
                 extract_atomic_energies=False,
                 head_name=head_name,

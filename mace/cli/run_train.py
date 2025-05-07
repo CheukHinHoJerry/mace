@@ -252,6 +252,7 @@ def run(args) -> None:
             config_type_weights = get_config_type_weights(
                 head_config.config_type_weights
             )
+
             collections, atomic_energies_dict = get_dataset_from_xyz(
                 work_dir=args.work_dir,
                 train_path=train_files_ase_list,
@@ -266,9 +267,12 @@ def run(args) -> None:
                 virials_key=head_config.virials_key,
                 dipole_key=head_config.dipole_key,
                 charges_key=head_config.charges_key,
+                magmom_key=head_config.magmom_key,
+                magforces_key=head_config.magforces_key,
                 head_name=head_config.head_name,
                 keep_isolated_atoms=head_config.keep_isolated_atoms,
             )
+            
             head_config.collections = SubsetCollection(
                 train=collections.train,
                 valid=collections.valid,

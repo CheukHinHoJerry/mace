@@ -98,6 +98,7 @@ def config_from_atoms_list(
     virials_key="REF_virials",
     dipole_key="REF_dipole",
     charges_key="REF_charges",
+    magmom_key="REF_magmom",
     magforces_key="REF_magforces",
     head_key="head",
     config_type_weights: Optional[Dict[str, float]] = None,
@@ -117,6 +118,7 @@ def config_from_atoms_list(
                 virials_key=virials_key,
                 dipole_key=dipole_key,
                 charges_key=charges_key,
+                magmom_key=magmom_key,
                 magforces_key=magforces_key,
                 head_key=head_key,
                 config_type_weights=config_type_weights,
@@ -133,6 +135,7 @@ def config_from_atoms(
     virials_key="REF_virials",
     dipole_key="REF_dipole",
     charges_key="REF_charges",
+    magmom_key="REF_magmom",
     magforces_key="REF_magforces",
     head_key="head",
     config_type_weights: Optional[Dict[str, float]] = None,
@@ -146,7 +149,7 @@ def config_from_atoms(
     stress = atoms.info.get(stress_key, None)  # eV / Ang ^ 3
     virials = atoms.info.get(virials_key, None)
     dipole = atoms.info.get(dipole_key, None)  # Debye
-    magmom = atoms.arrays.get("dft_magmom", None)
+    magmom = atoms.arrays.get(magmom_key, None)
     magforces = atoms.arrays.get(magforces_key, None)
     #print("magforces: ", magforces)
     # Charges default to 0 instead of None if not found
@@ -195,6 +198,7 @@ def config_from_atoms(
         stress=stress,
         virials=virials,
         dipole=dipole,
+        
         charges=charges,
         weight=weight,
         head=head,
@@ -235,6 +239,7 @@ def load_from_xyz(
     virials_key: str = "REF_virials",
     dipole_key: str = "REF_dipole",
     charges_key: str = "REF_charges",
+    magmom_key: str = "REF_magmom",
     magforces_key: str = "REF_magforces",
     head_key: str = "head",
     head_name: str = "Default",
@@ -315,6 +320,7 @@ def load_from_xyz(
         virials_key=virials_key,
         dipole_key=dipole_key,
         charges_key=charges_key,
+        magmom_key=magmom_key,
         magforces_key=magforces_key,
         head_key=head_key,
     )

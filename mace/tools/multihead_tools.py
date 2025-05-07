@@ -33,6 +33,8 @@ class HeadConfig:
     virials_key: Optional[str] = None
     dipole_key: Optional[str] = None
     charges_key: Optional[str] = None
+    magmom_key: Optional[str] = None
+    magforces_key: Optional[str] = None
     keep_isolated_atoms: Optional[bool] = None
     atomic_numbers: Optional[Union[List[int], List[str]]] = None
     mean: Optional[float] = None
@@ -73,6 +75,8 @@ def dict_head_to_dataclass(
         virials_key=head.get("virials_key", args.virials_key),
         dipole_key=head.get("dipole_key", args.dipole_key),
         charges_key=head.get("charges_key", args.charges_key),
+        magmom_key=head.get("magmom_key", args.magmom_key),
+        magforces_key=head.get("magforces_key", args.magforces_key),
         keep_isolated_atoms=head.get("keep_isolated_atoms", args.keep_isolated_atoms),
     )
 

@@ -490,6 +490,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="REF_charges",
     )
+    parser.add_argument(
+        "--magmom_key",
+        help="Key of magnetic moment in training xyz",
+        type=str,
+        default="REF_magmom",
+    )
+    parser.add_argument(
+        "--magforces_key",
+        help="Key of magnetic forces in training xyz",
+        type=str,
+        default="REF_magforces",
+    )
 
     # Pretraining-specific keys
     parser.add_argument(
