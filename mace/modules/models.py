@@ -2915,3 +2915,91 @@ class EnergyDipolesMACE(torch.nn.Module):
             "atomic_dipoles": atomic_dipoles,
         }
         return output
+
+# this does not differentiate through SCF but just a convenient wrapper for equilibrating magmom 
+# for a given position. Still later we can do something like:
+# given position also predict the magnetic moment based on the previous magnetic moment
+# to accelerate SCF cycles that have to be done
+class MagneticEqMACE(torch.nn.Module):
+    def __init__(self, model, n_scf_step=10, scf_tol=1e-5, scf_logging=False):
+        super().__init__()
+        self.magmom_mace = model
+        self.n_scf_step = n_scf_step
+        self.scf_tol = scf_tol
+        self.cache_magmom = None
+        self.scf_logging = scf_logging
+
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        
+        device = next(self.magmom_mace.parameters()).device
+
+        # === Initialize magmom ===
+        if "magmom" in data:
+            magmom = data["magmom"].detach().to(device).clone()
+        elif self.cache_magmom is not None:
+            magmom = self.cache_magmom.clone()
+        else:
+            raise ValueError("No initial magnetic moment provided and no cache available.")
+
+        magmom = magmom.to(device)
+        magmom.requires_grad_(True)
+        energy_history = []
+
+        # === Define optimizer ===
+        optimizer = torch.optim.LBFGS([magmom], max_iter=self.n_scf_step, tolerance_grad=self.scf_tol, line_search_fn="strong_wolfe")
+
+        def closure():
+            optimizer.zero_grad()
+
+            # Update magnetic moments in config
+            data["magmom"] = magmom
+
+            # Evaluate model
+            output = self.magmom_mace(
+                data,
+                training=training,
+                compute_force=compute_force,
+                compute_virials=compute_virials,
+                compute_stress=compute_stress,
+                compute_displacement=compute_displacement,
+            )
+
+            energy = output["energy"][0]
+            energy_history.append(energy.item())
+
+            # Set gradient manually from mag_forces
+            magmom.grad = -output["magforces"].detach()
+            if self.scf_logging:
+                print(f"[SCF LBFGS] Energy = {energy.item():.6f} | Mag force norm = {magmom.grad.norm().item():.6f}")
+            return energy
+
+        optimizer.step(closure)
+
+        # Cache final magnetic moments
+        self.cache_magmom = magmom.detach()
+
+        # Final output (evaluate one last time with final magmom)
+        data["dft_magmom"] = magmom
+        final_output = self.magmom_mace(
+            data,
+            training=training,
+            compute_force=compute_force,
+            compute_virials=compute_virials,
+            compute_stress=compute_stress,
+            compute_displacement=compute_displacement,
+        )
+
+        # Add SCF info to output
+        final_output["scf_energy_history"] = torch.tensor(energy_history, dtype=torch.float32)
+        final_output["scf_steps"] = len(energy_history)
+        final_output["equilibrated_magmom"] = magmom.detach()
+
+        return final_output

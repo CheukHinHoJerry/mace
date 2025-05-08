@@ -47,6 +47,7 @@ from .models import (
     ScaleShiftBOTNet,
     ScaleShiftMACE,
     #
+    MagneticEqMACE,
     MagneticScaleShiftMACE,
     MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE,
     MagneticSolidHarmonicsScaleShiftMACE,
