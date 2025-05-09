@@ -34,6 +34,7 @@ def get_transfer_keys(num_layers: int) -> List[str]:
             for s in [
                 f"interactions.{j}.magmom_linear.weight",
                 f"interactions.{j}.magmom_skip_tp.weight",
+                f"products.{j}.linear_ori.weight",
             ]
     ]
 

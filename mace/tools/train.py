@@ -409,6 +409,7 @@ def take_step(
             compute_force=output_args["forces"],
             compute_virials=output_args["virials"],
             compute_stress=output_args["stress"],
+            compute_magforces=output_args["magforces"]
         )
         loss = loss_fn(pred=output, ref=batch)
         loss.backward()

@@ -276,6 +276,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument(
+        "--compute_magforces",
+        help="Select True to compute stress",
+        type=str2bool,
+        default=True,
+    )
+    parser.add_argument(
         "--compute_stress",
         help="Select True to compute stress",
         type=str2bool,

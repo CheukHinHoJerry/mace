@@ -707,7 +707,7 @@ def run(args) -> None:
     # Model
     model, output_args = configure_model(args, train_loader, atomic_energies, model_foundation, heads, z_table, head_configs)
     model.to(device)
-
+    print("output_args: ", output_args)
     logging.debug(model)
     logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
     logging.info("")

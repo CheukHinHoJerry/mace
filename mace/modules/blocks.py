@@ -443,8 +443,7 @@ class EquivariantProductBasisWithSelfMagmomBlock(torch.nn.Module):
         tp_weights = self.conv_tp_weights(magmom_node_inv_feats)
 
         out = self.conv_tp(node_feats, magmom_node_attrs, tp_weights)
-        #print("max out: ", torch.max(out))
-        #print("min out: ", torch.min(out))
+        
         # out = node_feats
         if self.use_sc and sc is not None:
             out_message = self.linear(out) + self.linear_ori(node_feats) + sc

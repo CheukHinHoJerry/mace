@@ -600,24 +600,51 @@ class MagneticMACE(torch.nn.Module):
             use_sc_first = True
 
         node_feats_irreps_out = inter.target_irreps
-        prod = EquivariantProductBasisBlock(
-            node_feats_irreps=node_feats_irreps_out,
-            target_irreps=hidden_irreps,
-            correlation=correlation[0],
-            num_elements=num_elements,
-            use_sc=use_sc_first,
-            cueq_config=cueq_config,
-            contraction_cls=contraction_cls_first
-        )
-        magmom_prod = EquivariantProductBasisBlock(
-            node_feats_irreps=node_feats_irreps_out,
-            target_irreps=hidden_irreps,
-            correlation=correlation[0],
-            num_elements=num_elements,
-            use_sc=use_sc_first,
-            cueq_config=cueq_config,
-            contraction_cls=contraction_cls_first
-        )
+
+        
+        
+        if "SelfMagmom" not in self.__class__.__name__:
+            prod = EquivariantProductBasisBlock(
+                node_feats_irreps=node_feats_irreps_out,
+                target_irreps=hidden_irreps,
+                correlation=correlation[0],
+                num_elements=num_elements,
+                use_sc=use_sc_first,
+                cueq_config=cueq_config,
+                contraction_cls=contraction_cls_first
+            )
+            magmom_prod = EquivariantProductBasisBlock(
+                node_feats_irreps=node_feats_irreps_out,
+                target_irreps=hidden_irreps,
+                correlation=correlation[0],
+                num_elements=num_elements,
+                use_sc=use_sc_first,
+                cueq_config=cueq_config,
+                contraction_cls=contraction_cls_first)
+        else:
+            prod = EquivariantProductBasisWithSelfMagmomBlock(
+                node_feats_irreps=node_feats_irreps_out,
+                target_irreps=hidden_irreps,
+                # assume only a single correlation
+                correlation=correlation[0],
+                use_sc=use_sc_first,
+                num_elements=len(self.atomic_numbers),
+                cueq_config=cueq_config,
+                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+            )
+            magmom_prod = EquivariantProductBasisWithSelfMagmomBlock(
+                node_feats_irreps=node_feats_irreps_out,
+                target_irreps=hidden_irreps,
+                # assume only a single correlation
+                correlation=correlation[0],
+                use_sc=use_sc_first,
+                num_elements=len(self.atomic_numbers),
+                cueq_config=cueq_config,
+                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+                )
+
         self.products = torch.nn.ModuleList([prod])
         self.magmom_products = torch.nn.ModuleList([magmom_prod])
 
@@ -656,26 +683,53 @@ class MagneticMACE(torch.nn.Module):
                 magmom_node_attrs_irreps=magmom_sh_irreps
             )
             self.interactions.append(inter)
-            prod = EquivariantProductBasisBlock(
-                node_feats_irreps=interaction_irreps,
-                target_irreps=hidden_irreps_out,
-                correlation=correlation[i + 1],
-                num_elements=num_elements,
-                use_sc=True,
-                cueq_config=cueq_config,
-                contraction_cls=contraction_cls
-            )
-            self.products.append(prod)
 
-            magmom_prod = EquivariantProductBasisBlock(
-                node_feats_irreps=interaction_irreps,
-                target_irreps=hidden_irreps_out,
-                correlation=correlation[i + 1],
-                num_elements=num_elements,
-                use_sc=True,
-                cueq_config=cueq_config,
-                contraction_cls=contraction_cls
-            )
+            if "SelfMagmom" not in self.__class__.__name__:
+                prod = EquivariantProductBasisBlock(
+                    node_feats_irreps=interaction_irreps,
+                    target_irreps=hidden_irreps_out,
+                    correlation=correlation[i + 1],
+                    num_elements=num_elements,
+                    use_sc=True,
+                    cueq_config=cueq_config,
+                    contraction_cls=contraction_cls
+                )
+                magmom_prod = EquivariantProductBasisBlock(
+                    node_feats_irreps=interaction_irreps,
+                    target_irreps=hidden_irreps_out,
+                    correlation=correlation[i + 1],
+                    num_elements=num_elements,
+                    use_sc=True,
+                    cueq_config=cueq_config,
+                    contraction_cls=contraction_cls
+                )
+            else:
+                prod = EquivariantProductBasisWithSelfMagmomBlock(
+                    node_feats_irreps=interaction_irreps,
+                    target_irreps=hidden_irreps_out,
+                    # assume only a single correlation
+                    correlation=correlation[i + 1],
+                    num_elements=num_elements,
+                    use_sc = True,
+                    cueq_config=prod.cueq_config,
+                    contraction_cls=contraction_cls,
+                    magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                    magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+                )
+                magmom_prod = EquivariantProductBasisWithSelfMagmomBlock(
+                    node_feats_irreps=interaction_irreps,
+                    target_irreps=hidden_irreps_out,
+                    # assume only a single correlation
+                    correlation=correlation[i + 1],
+                    num_elements=num_elements,
+                    use_sc = True,
+                    cueq_config=prod.cueq_config,
+                    contraction_cls=contraction_cls,
+                    magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                    magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+                )
+
+            self.products.append(prod)
             self.magmom_products.append(magmom_prod)
             
             if i == num_interactions - 2:
@@ -746,6 +800,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
         compute_stress: bool = False,
         compute_displacement: bool = False,
         compute_hessian: bool = False,
+        compute_magforces: bool = True,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         data["positions"].requires_grad_(True)
@@ -889,7 +944,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
-            compute_magforces=True,
+            compute_magforces=compute_magforces,
         )
         output = {
             "energy": total_energy,
@@ -950,6 +1005,7 @@ class MagneticSolidHarmonicsScaleShiftMACE(MagneticMACE):
         compute_stress: bool = False,
         compute_displacement: bool = False,
         compute_hessian: bool = False,
+        compute_magforces: bool = True,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         data["positions"].requires_grad_(True)
@@ -1092,7 +1148,7 @@ class MagneticSolidHarmonicsScaleShiftMACE(MagneticMACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
-            compute_magforces=True,
+            compute_magforces=compute_magforces,
         )
         output = {
             "energy": total_energy,
@@ -1137,6 +1193,7 @@ class MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE(MagneticMACE):
         compute_stress: bool = False,
         compute_displacement: bool = False,
         compute_hessian: bool = False,
+        compute_magforces: bool = True,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         data["positions"].requires_grad_(True)
@@ -1268,7 +1325,7 @@ class MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE(MagneticMACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
-            compute_magforces=True,
+            compute_magforces=compute_magforces,
         )
         output = {
             "energy": total_energy,
@@ -1301,23 +1358,37 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
         self.mag_solid_harmoics = SHModule(self.mag_spherical_harmonics._lmax)
         new_products = torch.nn.ModuleList()
         
-        for prod in self.products:
-            new_products.append(EquivariantProductBasisWithSelfMagmomBlock(
-                node_feats_irreps=prod.symmetric_contractions.irreps_in,
-                target_irreps=prod.symmetric_contractions.irreps_out,
-                # assume only a single correlation
-                correlation=prod.symmetric_contractions.contractions[0].correlation,
-                use_sc=prod.use_sc,
-                num_elements=len(self.atomic_numbers),
-                cueq_config=prod.cueq_config,
-                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
-                magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
-                )
-            )
+        # for prod in self.products:
+        #     if isinstance(prod.symmetric_contractions, mace.modules.symmetric_contraction.SymmetricContraction):
+        #         new_products.append(EquivariantProductBasisWithSelfMagmomBlock(
+        #             node_feats_irreps=prod.symmetric_contractions.irreps_in,
+        #             target_irreps=prod.symmetric_contractions.irreps_out,
+        #             # assume only a single correlation
+        #             correlation=prod.symmetric_contractions.contractions[0].correlation,
+        #             use_sc=prod.use_sc,
+        #             num_elements=len(self.atomic_numbers),
+        #             cueq_config=prod.cueq_config,
+        #             magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+        #             magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+        #             )
+        #         )
+        #     else:
+        #         new_products.append(EquivariantProductBasisWithSelfMagmomBlock(
+        #             node_feats_irreps=prod.symmetric_contractions.irreps_in,
+        #             target_irreps=prod.symmetric_contractions.irreps_out,
+        #             # assume only a single correlation
+        #             correlation=prod.symmetric_contractions.contractions[0].correlation,
+        #             use_sc=prod.use_sc,
+        #             num_elements=len(self.atomic_numbers),
+        #             cueq_config=prod.cueq_config,
+        #             magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+        #             magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+        #             )
+        #         )
         self.mag_spherical_harmonics = None
         self.magmom_readouts = None
         self.magmom_products = None
-        self.products = new_products
+        #self.products = new_products
 
     def forward(
         self,
@@ -1328,6 +1399,7 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
         compute_stress: bool = False,
         compute_displacement: bool = False,
         compute_hessian: bool = False,
+        compute_magforces: bool = True,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         data["positions"].requires_grad_(True)
@@ -1461,7 +1533,7 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
-            compute_magforces=True,
+            compute_magforces=compute_magforces,
         )
         output = {
             "energy": total_energy,
@@ -1505,6 +1577,7 @@ class MagneticSolidHarmonicsFlexibleSOScaleShiftMACE(MagneticMACE):
         compute_stress: bool = False,
         compute_displacement: bool = False,
         compute_hessian: bool = False,
+        compute_magforces: bool = True,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         data["positions"].requires_grad_(True)
@@ -1640,7 +1713,7 @@ class MagneticSolidHarmonicsFlexibleSOScaleShiftMACE(MagneticMACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
-            compute_magforces=True,
+            compute_magforces=compute_magforces,
         )
         output = {
             "energy": total_energy,
