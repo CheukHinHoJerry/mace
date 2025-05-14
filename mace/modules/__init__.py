@@ -47,7 +47,7 @@ from .models import (
     ScaleShiftBOTNet,
     ScaleShiftMACE,
     #
-    MagneticEqMACE,
+    MagneticSCFMACE,
     MagneticScaleShiftMACE,
     MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE,
     MagneticSolidHarmonicsScaleShiftMACE,
@@ -55,6 +55,9 @@ from .models import (
     MagneticSolidHarmonicsSeparateReadoutMixMagmomScaleShiftMACE,
     MagneticSolidHarmonicsFlexibleSOScaleShiftMACE,
     MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodySelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE
 )
 from .radial import BesselBasis, GaussianBasis, PolynomialCutoff, ZBLBasis
 from .symmetric_contraction import SymmetricContraction

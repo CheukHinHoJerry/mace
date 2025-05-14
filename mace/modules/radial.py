@@ -119,6 +119,44 @@ class ChebychevBasis2(torch.nn.Module):
     def __repr__(self):
         return f"{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis})"
 
+class ChebychevBasisWithConst(torch.nn.Module):
+    """
+    Fully differentiable Chebyshev basis (T₀ to Tₙ₋₁) using recurrence.
+    Returns full set including constant term T₀(x) = 1.
+    """
+
+    def __init__(self, r_max: float, num_basis=8):
+        super().__init__()
+        self.num_basis = num_basis
+        self.r_max = r_max
+        self.register_buffer("n", torch.arange(num_basis))  # compatibility
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor of shape [N, 1], assumed in [-1, 1]
+
+        Returns:
+            Tensor of shape [N, num_basis]: T₀(x), T₁(x), ..., Tₙ₋₁(x)
+        """
+        T0 = torch.ones_like(x)       # T₀(x)
+        if self.num_basis == 1:
+            return T0
+
+        T1 = x                        # T₁(x)
+        B = [T0, T1]
+
+        for _ in range(2, self.num_basis):
+            T2 = 2 * x * T1 - T0
+            B.append(T2)
+            T0, T1 = T1, T2
+
+        out = torch.cat(B[:self.num_basis], dim=-1)  # shape: [N, num_basis]
+        return out
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(r_max={self.r_max}, num_basis={self.num_basis})"
+
 @compile_mode("script")
 class GaussianBasis(torch.nn.Module):
     """

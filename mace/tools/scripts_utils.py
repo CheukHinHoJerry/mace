@@ -799,8 +799,7 @@ def get_params_options(
         else:
             no_decay_interactions[name] = param
 
-    param_options = dict(
-        params=[
+    params_list = [
             {
                 "name": "embedding",
                 "params": model.node_embedding.parameters(),
@@ -826,7 +825,35 @@ def get_params_options(
                 "params": model.readouts.parameters(),
                 "weight_decay": 0.0,
             },
-        ],
+        ]
+
+    if model.__class__.__name__ == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE" \
+        and args.train_one_body_contribution:
+            params_list.append({
+                "name": "magmom_exp_scaling_and_onebody_basis",
+                "params": [model.one_body_magmom_exp_scaling] + 
+                          list(model.onebody_magmombasis_list.parameters()),
+                "weight_decay": 0.0,
+            })
+
+    if model.__class__.__name__ == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE" \
+        and args.train_one_body_contribution:
+            params_list.append({
+                "name": "magmom_exp_scaling_and_onebody_basis",
+                "params": [model.one_body_magmom_exp_scaling] + 
+                          list(model.onebody_magmombasis_list.parameters()),
+                "weight_decay": 0.0,
+            })
+            # params_list.append({
+            #     "name": "Ginzburg_coeffs",
+            #     "params": [model.Ginzburg_Landau_coeffs,],
+            #     "weight_decay": 0.0,
+            # })
+            
+
+    logging.info("params_list:", params_list)
+    param_options = dict(
+        params=params_list,
         lr=args.lr,
         amsgrad=args.amsgrad,
         betas=(args.beta, 0.999),

@@ -132,6 +132,9 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE",
             "MagneticSolidHarmonicsFlexibleSOScaleShiftMACE",
             "MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodySelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -883,6 +886,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="SymmetricContraction",
     )
+    parser.add_argument(
+        "--train_one_body_contribution",
+        type=str2bool,
+        default=True
+    )
+
     return parser
 
 

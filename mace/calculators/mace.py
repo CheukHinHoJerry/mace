@@ -287,7 +287,7 @@ class MACECalculator(Calculator):
 
         batch_base = self._atoms_to_batch(atoms)
 
-        if self.model_type in ["MACE", "EnergyDipoleMACE"]:
+        if self.model_type in ["MACE", "EnergyDipoleMACE",]:
             batch = self._clone_batch(batch_base)
             node_heads = batch["head"][batch["batch"]]
             num_atoms_arange = torch.arange(batch["positions"].shape[0])
@@ -441,7 +441,7 @@ class MACECalculator(Calculator):
         return descriptors
 
 
-class MACEMagmomEqCalculator(Calculator):
+class MagneticMACECalculator(Calculator):
     """MACE ASE Calculator
     args:
         model_paths: str, path to model or models if a committee is produced
@@ -842,3 +842,8 @@ class MACEMagmomEqCalculator(Calculator):
         if self.num_models == 1:
             return descriptors[0]
         return descriptors
+
+    def clean_cache_magmom(self,):
+        for model in self.models:
+            if hasattr(model, "cache_magmom"):
+                model.cache_magmom = None

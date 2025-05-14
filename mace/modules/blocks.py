@@ -452,6 +452,138 @@ class EquivariantProductBasisWithSelfMagmomBlock(torch.nn.Module):
         return out_message
 
 @compile_mode("script")
+class EquivariantProductBasisWithOneBodySelfMagmomBlock(torch.nn.Module):
+    def __init__(
+        self,
+        node_feats_irreps: o3.Irreps,
+        target_irreps: o3.Irreps,
+        magmom_node_inv_feats_irreps: o3.Irreps,
+        magmom_node_attrs_irreps: o3.Irreps,
+        correlation: int,
+        use_sc: bool = True,
+        num_elements: Optional[int] = None,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+        contraction_cls: Optional[str] = "SymmetricContraction"
+    ) -> None:
+        super().__init__()
+
+        self.use_sc = use_sc
+        self.magmom_node_inv_feats_irreps = magmom_node_inv_feats_irreps
+        self.magmom_node_attrs_irreps = magmom_node_attrs_irreps
+        self.cueq_config = cueq_config
+        self.contraction_cls = contraction_cls
+        
+        if contraction_cls == "SymmetricContraction":
+            self.symmetric_contractions = SymmetricContractionWrapper(
+                irreps_in=node_feats_irreps,
+                irreps_out=target_irreps,
+                correlation=correlation,
+                num_elements=num_elements,
+                cueq_config=cueq_config,
+            )
+        else:
+            raise ValueError("Contraction class not supported")
+
+        # interaction with self magnetic moment
+        irreps_mid, instructions = tp_out_irreps_with_instructions(
+            target_irreps,
+            self.magmom_node_attrs_irreps,
+            target_irreps,
+        )
+        self.conv_tp = TensorProduct(
+            target_irreps,
+            self.magmom_node_attrs_irreps,
+            irreps_mid,
+            instructions=instructions,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+        )
+        magmom_input_dim = self.magmom_node_inv_feats_irreps.num_irreps
+        self.conv_tp_weights =  nn.FullyConnectedNet(
+            [magmom_input_dim] + [64, 64, 64] + [self.conv_tp.weight_numel],
+            torch.nn.functional.silu,
+        )
+
+        # get invariant dimension
+        self.onebody_magmombasis = nn.FullyConnectedNet(
+            [magmom_input_dim] + [64, 64, 64] + [target_irreps[0].mul],
+            torch.nn.functional.silu,
+        )
+        # TODO: add this for (1 - exp(-alpha * x))
+        # self.species_dependent_transform = Linear(
+            
+        # )
+        self.exp_scaling = torch.nn.Parameter(torch.tensor(5.0, requires_grad=True))
+
+        # Update linear
+        self.linear = Linear(
+            self.conv_tp.irreps_out,
+            target_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=cueq_config,
+        )
+        self.linear_ori = Linear(
+            target_irreps,
+            target_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=cueq_config,
+        )
+
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        sc: Optional[torch.Tensor],
+        node_attrs: torch.Tensor,
+        magmom_node_inv_feats: torch.Tensor,
+        magmom_node_attrs: torch.Tensor,
+        magmom_lenghts: torch.Tensor,
+    ) -> torch.Tensor:
+        use_cueq = False
+        use_cueq_mul_ir = False
+        if hasattr(self, "cueq_config"):
+            if self.cueq_config is not None:
+                if self.cueq_config.enabled and (
+                    self.cueq_config.optimize_all or self.cueq_config.optimize_symmetric
+                ):
+                    use_cueq = True
+                if self.cueq_config.layout_str == "mul_ir":
+                    use_cueq_mul_ir = True
+        if use_cueq:
+            if use_cueq_mul_ir:
+                node_feats = torch.transpose(node_feats, 1, 2)
+            index_attrs = torch.nonzero(node_attrs)[:, 1].int()
+            node_feats = self.symmetric_contractions(
+                node_feats.flatten(1),
+                index_attrs,
+            )
+        else:
+            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+
+
+        # interaction with magnectic moment
+        tp_weights = self.conv_tp_weights(magmom_node_inv_feats)
+
+        out = self.conv_tp(node_feats, magmom_node_attrs, tp_weights)
+
+        # add self magmom one body contribution for large volume limit
+        # invariant dimension
+
+        if len(out.shape) == 2:
+            out += (1 - torch.exp(-self.exp_scaling * magmom_lenghts)) * self.onebody_magmombasis(magmom_node_inv_feats)
+        else:
+            out[:, :, 0] += magmom_lenghts.unsqueeze(-1) * self.onebody_magmombasis(magmom_node_inv_feats)
+
+        # out = node_feats
+        if self.use_sc and sc is not None:
+            out_message = self.linear(out) + self.linear_ori(node_feats) + sc
+        else:
+            out_message = self.linear(out) + self.linear_ori(node_feats)
+        return out_message
+
+@compile_mode("script")
 class InteractionBlock(torch.nn.Module):
     def __init__(
         self,
@@ -1318,15 +1450,14 @@ class MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock(MagneticIntera
     ) -> Tuple[torch.Tensor, None]:
         sender = edge_index[0]
         receiver = edge_index[1]
-        #print("edge index shape: ", edge_index.shape)
-        #print("magmom_node_attrs: ", magmom_node_attrs)
+        
         num_nodes = node_feats.shape[0]
         node_feats = self.linear_up(node_feats)
         
         # boardcast node feats to number of nodes
         magmom_inv_feats_j = magmom_node_inv_feats[sender]
-
         edge_feats_with_magmom = torch.cat([edge_feats, magmom_inv_feats_j], dim=-1)        
+        
         # combined learnable radial
         tp_weights = self.conv_tp_weights(edge_feats_with_magmom)
 
@@ -1346,8 +1477,6 @@ class MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock(MagneticIntera
         density = scatter_sum(
             src=edge_density, index=receiver, dim=0, dim_size=num_nodes
         )  # [n_nodes, 1]
-
-        # highlighted message for central message
         
         magmom_message = scatter_sum(
             src=magmom_mji, index=receiver, dim = 0, dim_size=num_nodes,
