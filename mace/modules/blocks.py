@@ -373,12 +373,12 @@ class EquivariantProductBasisWithSelfMagmomBlock(torch.nn.Module):
 
         # interaction with self magnetic moment
         irreps_mid, instructions = tp_out_irreps_with_instructions(
-            target_irreps,
+            o3.Irreps(str(target_irreps)),
             self.magmom_node_attrs_irreps,
-            target_irreps,
+            o3.Irreps(str(target_irreps)),
         )
         self.conv_tp = TensorProduct(
-            target_irreps,
+            o3.Irreps(str(target_irreps)),
             self.magmom_node_attrs_irreps,
             irreps_mid,
             instructions=instructions,
@@ -391,21 +391,18 @@ class EquivariantProductBasisWithSelfMagmomBlock(torch.nn.Module):
             [magmom_input_dim] + [64, 64, 64] + [self.conv_tp.weight_numel],
             torch.nn.functional.silu,
         )
-        # self.conv_tp_weights =  nn.FullyConnectedNet(
-        #     [magmom_input_dim] + [self.conv_tp.weight_numel],
-        #     None,
-        # )
+        
         # Update linear
         self.linear = Linear(
             self.conv_tp.irreps_out,
-            target_irreps,
+            o3.Irreps(str(target_irreps)),
             internal_weights=True,
             shared_weights=True,
             cueq_config=cueq_config,
         )
         self.linear_ori = Linear(
-            target_irreps,
-            target_irreps,
+            o3.Irreps(str(target_irreps)),
+            o3.Irreps(str(target_irreps)),
             internal_weights=True,
             shared_weights=True,
             cueq_config=cueq_config,
@@ -1294,8 +1291,7 @@ class MagneticRealAgnosticDensityInteractionBlock(MagneticInteractionBlock):
     ) -> Tuple[torch.Tensor, None]:
         sender = edge_index[0]
         receiver = edge_index[1]
-        #print("edge index shape: ", edge_index.shape)
-        #print("magmom_node_attrs: ", magmom_node_attrs)
+        
         num_nodes = node_feats.shape[0]
         node_feats = self.linear_up(node_feats)
 
@@ -1456,6 +1452,8 @@ class MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock(MagneticIntera
         
         # boardcast node feats to number of nodes
         magmom_inv_feats_j = magmom_node_inv_feats[sender]
+        print("edge_feats.shape: ", edge_feats.shape)
+        print("magmom_inv_feats_j.shape: ", magmom_inv_feats_j.shape)
         edge_feats_with_magmom = torch.cat([edge_feats, magmom_inv_feats_j], dim=-1)        
         
         # combined learnable radial
