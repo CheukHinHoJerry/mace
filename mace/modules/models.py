@@ -689,7 +689,7 @@ class MagneticMACE(torch.nn.Module):
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
-                magmom_node_inv_feats_irreps=hidden_irreps, #o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
                 magmom_node_attrs_irreps=magmom_sh_irreps
             )
             self.interactions.append(inter)
@@ -2046,14 +2046,12 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleSh
         element_dependent_scaling.retain_grad()
         
         magmom_lenghts_trans = 1 - 2 * (magmom_lenghts / element_dependent_scaling) ** 2
-        # magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-9)
-        
         magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
 
         #
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
 
-        # one body contribution radials, this is with constant shift.
+        # one body contribution radials, this is with constant shift so that it can be fitted
         magmom_one_body_radials = self.one_body_cheb_basis_with_const(
             magmom_lenghts_trans
         )
@@ -2062,9 +2060,9 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleSh
         node_es_list = [pair_node_energy]
         node_feats_list = []
         magmom_node_feats_list = []
-        for interaction, product, readout, onebody_magmombasis in zip(
+        for (idx, (interaction, product, readout, onebody_magmombasis)) in enumerate(zip(
             self.interactions, self.products, self.readouts, self.onebody_magmombasis_list
-        ):
+        )):
             node_feats, sc = interaction(
                 node_attrs=data["node_attrs"],
                 node_feats=node_feats,
@@ -2082,12 +2080,18 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleSh
                 #magmom_lenghts=magmom_lenghts,
             )
             # linear (natom, num_basis) -> (natom, 1)
-            # remove certain constant to make it 0, this should be computed outside after pre-training
+            # remove certain constant to make it matches with E0, 
+            # self.one_body_magmom_const_correction is computed outside after pre-training
             onebody_magmom_contri = onebody_magmombasis(magmom_one_body_radials) - self.one_body_magmom_const_correction
             node_feats_list.append(node_feats)
-            node_es_list.append(
-                readout(node_feats, node_heads)[num_atoms_arange, node_heads] + onebody_magmom_contri[num_atoms_arange, node_heads]
-            )  # {[n_nodes, ], }
+            if idx == (len(self.readouts) - 1):    
+                node_es_list.append(
+                    readout(node_feats, node_heads)[num_atoms_arange, node_heads] + onebody_magmom_contri[num_atoms_arange, node_heads]
+                )  # {[n_nodes, ], }
+            else:
+                node_es_list.append(
+                    readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+                )  # {[n_nodes, ], }
 
 
         # Concatenate node features
