@@ -190,6 +190,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -210,6 +211,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
