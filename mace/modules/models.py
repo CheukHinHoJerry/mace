@@ -986,7 +986,7 @@ class SHModule(torch.nn.Module):
         sh = self.SH(torch.index_select(
                 xyz, 1, torch.tensor([2, 0, 1], dtype=torch.long,device=xyz.device)
             ))
-        return sh # * self.scaling
+        return sh
 
 @compile_mode("script")
 class MagneticSolidHarmonicsScaleShiftMACE(MagneticMACE):
