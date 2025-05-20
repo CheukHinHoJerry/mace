@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import numpy as np
 import torch
-from e3nn import o3
+from e3nn import o3, nn
 from e3nn.util.jit import compile_mode
 
 from mace.data import AtomicData
@@ -35,7 +35,21 @@ from .utils import (
     get_symmetric_displacement,
 )
 
-# pylint: disable=C0302
+
+# graph long rage
+from graph_longrange.kspace_radial import GaussiansRadialBasis
+from graph_longrange.kspace import LocalisedLongRangeElementDependentLinearBlock
+from graph_longrange.gto_electrostatics import (
+    gto_basis_kspace_cutoff,
+)
+from graph_longrange.kspace import compute_k_vectors
+
+from scipy.constants import pi
+
+
+from mace.modules.wrapper_ops import (
+    Linear,
+)
 
 
 @compile_mode("script")
@@ -465,6 +479,199 @@ class ScaleShiftMACE(MACE):
 
         return output
 
+@compile_mode("script")
+class ScaleShiftLongRangeMACE(MACE):
+    def __init__(
+        self,
+        atomic_inter_scale: float,
+        atomic_inter_shift: float,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+
+        hidden_irreps = kwargs.get('hidden_irreps', None)
+        MLP_irreps = kwargs.get('MLP_irreps', None)
+        heads = kwargs.get('heads', None)
+        gate = kwargs.get('gate', None)
+        cueq_config = kwargs.get('cueq_config', None)
+
+
+        self.scale_shift = ScaleShiftBlock(
+            scale=atomic_inter_scale, shift=atomic_inter_shift
+        )
+
+        # kspace readial
+        kspace_rad = GaussiansRadialBasis(
+            num_basis = 50,
+            r_min = 0, 
+            r_max = 10,
+        )
+        
+        # add long range interaction
+        self.local_longrange_element_dep_layer = LocalisedLongRangeElementDependentLinearBlock(
+            kspace_rad,
+            len(self.atomic_numbers),
+            hidden_irreps, # hidden irreps
+            hidden_irreps, # hidden irreps
+            max_ell = 1,
+        )
+        self.longrange_readout = Linear(hidden_irreps, "1x0e")
+
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+        compute_hessian: bool = False,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        # Setup
+        data["positions"].requires_grad_(True)
+        data["node_attrs"].requires_grad_(True)
+        num_graphs = data["ptr"].numel() - 1
+        num_atoms_arange = torch.arange(data["positions"].shape[0])
+        node_heads = (
+            data["head"][data["batch"]]
+            if "head" in data
+            else torch.zeros_like(data["batch"])
+        )
+        displacement = torch.zeros(
+            (num_graphs, 3, 3),
+            dtype=data["positions"].dtype,
+            device=data["positions"].device,
+        )
+        if compute_virials or compute_stress or compute_displacement:
+            (
+                data["positions"],
+                data["shifts"],
+                displacement,
+            ) = get_symmetric_displacement(
+                positions=data["positions"],
+                unit_shifts=data["unit_shifts"],
+                cell=data["cell"],
+                edge_index=data["edge_index"],
+                num_graphs=num_graphs,
+                batch=data["batch"],
+            )
+
+        # Atomic energies
+        node_e0 = self.atomic_energies_fn(data["node_attrs"])[
+            num_atoms_arange, node_heads
+        ]
+        e0 = scatter_sum(
+            src=node_e0, index=data["batch"], dim=0, dim_size=num_graphs
+        )  # [n_graphs, num_heads]
+
+        # Embeddings
+        node_feats = self.node_embedding(data["node_attrs"])
+        vectors, lengths = get_edge_vectors_and_lengths(
+            positions=data["positions"],
+            edge_index=data["edge_index"],
+            shifts=data["shifts"],
+        )
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats = self.radial_embedding(
+            lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+        )
+        if hasattr(self, "pair_repulsion"):
+            pair_node_energy = self.pair_repulsion_fn(
+                lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+            )
+        else:
+            pair_node_energy = torch.zeros_like(node_e0)
+        # Interactions
+        node_es_list = [pair_node_energy]
+        node_feats_list = []
+        for interaction, product, readout in zip(
+            self.interactions, self.products, self.readouts
+        ):
+            node_feats, sc = interaction(
+                node_attrs=data["node_attrs"],
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data["edge_index"],
+            )
+            node_feats = product(
+                node_feats=node_feats, sc=sc, node_attrs=data["node_attrs"]
+            )
+            node_feats_list.append(node_feats)
+            node_es_list.append(
+                readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+            )  # {[n_nodes, ], }
+
+        # add long range interaction
+        # get node features from the last layers
+        node_feats_last = node_feats_list[-1]
+
+        # compute k_vectors
+        # Calculate reciprocal cell: 2π * inverse of transposed cell
+        cell_tmp = data["cell"].view(-1, 3, 3)
+        rcell = 2 * pi * torch.linalg.inv(cell_tmp.transpose(1, 2))
+        k_vectors, k_vectors_normed_squared, k_vectors_mask = compute_k_vectors(
+            1.5*gto_basis_kspace_cutoff([1.0], 1), cell_tmp, rcell
+        )
+
+        # element dependent block for global k-space work
+        longrange_local_feats = self.local_longrange_element_dep_layer(
+            node_attrs = data["node_attrs"],
+            node_feats = node_feats_last,
+            positions = data['positions'],
+            k_lengths = k_vectors_normed_squared.sqrt(),
+            k_vectors = k_vectors,
+            batch = data["batch"]
+        )
+        
+        long_range_e = self.longrange_readout(longrange_local_feats)
+        # 
+
+        # Concatenate node features
+        node_feats_out = torch.cat(node_feats_list, dim=-1)
+
+        # Sum over interactions
+        node_inter_es = torch.sum(
+            torch.stack(node_es_list, dim=0), dim=0
+        )  # [n_nodes, ]
+        node_inter_es = self.scale_shift(node_inter_es, node_heads)
+
+        # Sum over nodes in graph
+        inter_e = scatter_sum(
+            src=node_inter_es, index=data["batch"], dim=-1, dim_size=num_graphs
+        )  # [n_graphs,]
+
+        # add long range energy
+        
+
+        # Add E_0 and (scaled) interaction energy
+        total_energy = e0 + inter_e
+        node_energy = node_e0 + node_inter_es
+        forces, virials, stress, hessian = get_outputs(
+            energy=inter_e,
+            positions=data["positions"],
+            displacement=displacement,
+            cell=data["cell"],
+            training=training,
+            compute_force=compute_force,
+            compute_virials=compute_virials,
+            compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
+        )
+        output = {
+            "energy": total_energy,
+            "node_energy": node_energy,
+            "interaction_energy": inter_e,
+            "forces": forces,
+            "virials": virials,
+            "stress": stress,
+            "hessian": hessian,
+            "displacement": displacement,
+            "node_feats": node_feats_out,
+        }
+
+        return output
 
 class BOTNet(torch.nn.Module):
     def __init__(
