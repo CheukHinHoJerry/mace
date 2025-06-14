@@ -810,13 +810,13 @@ class MagneticMACECalculator(Calculator):
             atoms = self.atoms
         if self.model_type != "MACE":
             raise NotImplementedError("Only implemented for MACE models")
-        num_interactions = int(self.models[0].num_interactions)
+        num_interactions = int(self.models[0].magmom_mace.num_interactions)
         if num_layers == -1:
             num_layers = num_interactions
         batch = self._atoms_to_batch(atoms)
         descriptors = [model(batch.to_dict())["node_feats"] for model in self.models]
 
-        irreps_out = o3.Irreps(str(self.models[0].products[0].linear.irreps_out))
+        irreps_out = o3.Irreps(str(self.models[0].magmom_mace.products[0].linear.irreps_out))
         l_max = irreps_out.lmax
         num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
         per_layer_features = [irreps_out.dim for _ in range(num_interactions)]
