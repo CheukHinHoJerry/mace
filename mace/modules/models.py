@@ -986,7 +986,7 @@ class SHModule(torch.nn.Module):
         sh = self.SH(torch.index_select(
                 xyz, 1, torch.tensor([2, 0, 1], dtype=torch.long,device=xyz.device)
             ))
-        return sh # * self.scaling
+        return sh
 
 @compile_mode("script")
 class MagneticSolidHarmonicsScaleShiftMACE(MagneticMACE):
@@ -1654,14 +1654,15 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodySelfMagmomScaleShiftMACE(
         element_dependent_scaling = self.m_max[torch.argmax(data["node_attrs"], dim=1)].unsqueeze(-1)
         element_dependent_scaling.requires_grad_(True)
         element_dependent_scaling.retain_grad()
-        
+
+        # compute transformation for magenetic moments
         magmom_lenghts_trans = 1 - 2 * (magmom_lenghts / element_dependent_scaling) ** 2
-        # magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-9)
         
-        # Compute the spherical harmonics from the normalized vectors
+        # Compute the solid harmonics
         magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
 
-        #
+        # compute magnetic radial embedding (chebyshev polynomial)
+        # on transformed coordinate
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
         
         # Interactions

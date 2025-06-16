@@ -438,9 +438,14 @@ class EquivariantProductBasisWithSelfMagmomBlock(torch.nn.Module):
 
         # interaction with magnectic moment
         tp_weights = self.conv_tp_weights(magmom_node_inv_feats)
-
+        # print("magmom_node_inv_feats: ", magmom_node_inv_feats)
+        # print("tp_weights:", tp_weights)
         out = self.conv_tp(node_feats, magmom_node_attrs, tp_weights)
-        
+        # print("node_feats:", node_feats)
+        # print("magmom_node_attrs:", magmom_node_attrs)
+        # print("out: ", out)
+        # print(torch.norm(self.linear(out)))
+        # print(torch.norm(self.linear_ori(node_feats)))
         # out = node_feats
         if self.use_sc and sc is not None:
             out_message = self.linear(out) + self.linear_ori(node_feats) + sc
@@ -573,6 +578,9 @@ class EquivariantProductBasisWithOneBodySelfMagmomBlock(torch.nn.Module):
         else:
             out[:, :, 0] += magmom_lenghts.unsqueeze(-1) * self.onebody_magmombasis(magmom_node_inv_feats)
 
+        # print(torch.norm(self.linear(out)))
+        # print(torch.norm(self.linear_ori(node_feats)))
+        # print(torch.norm(sc))
         # out = node_feats
         if self.use_sc and sc is not None:
             out_message = self.linear(out) + self.linear_ori(node_feats) + sc
@@ -1479,7 +1487,6 @@ class MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock(MagneticIntera
             src=magmom_mji, index=receiver, dim = 0, dim_size=num_nodes,
         )
 
-        # not doing density normalization for now
         magmom_message = self.magmom_linear(magmom_message) / (density + 1)
         magmom_message = self.magmom_skip_tp(magmom_message, node_attrs)
         return (
@@ -1559,12 +1566,12 @@ class MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock(Magneti
             shared_weights=True,
             cueq_config=self.cueq_config,
         )
-        self.magmom_skip_tp = FullyConnectedTensorProduct(
-            self.irreps_out,
-            self.node_attrs_irreps,
-            self.irreps_out,
-            cueq_config=self.cueq_config,
-        )
+        # self.magmom_skip_tp = FullyConnectedTensorProduct(
+        #     self.irreps_out,
+        #     self.node_attrs_irreps,
+        #     self.irreps_out,
+        #     cueq_config=self.cueq_config,
+        # )
 
         # Selector TensorProduct
         self.skip_tp = FullyConnectedTensorProduct(
@@ -1633,7 +1640,7 @@ class MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock(Magneti
         )  # [n_nodes, 1]
         
         magmom_message = scatter_sum(
-            src=magmom_mji, index=receiver, dim = 0, dim_size=num_nodes,
+            src=magmom_mji, index=receiver, dim=0, dim_size=num_nodes,
         )
 
         magmom_message = self.magmom_linear(magmom_message) / (density + 1)
