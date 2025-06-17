@@ -862,6 +862,8 @@ def run(args) -> None:
         plotter=plotter,
         train_sampler=train_sampler,
         rank=rank,
+        # whether to do data augmnetation with magenticmoment
+        data_aug_magmom=args.data_aug_magmom,
     )
 
     logging.info("")

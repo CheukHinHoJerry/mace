@@ -167,6 +167,7 @@ def train(
     distributed_model: Optional[DistributedDataParallel] = None,
     train_sampler: Optional[DistributedSampler] = None,
     rank: Optional[int] = 0,
+    data_aug_magmom: Optional[bool] = False,
 ):
     lowest_loss = np.inf
     valid_loss = np.inf
@@ -223,6 +224,12 @@ def train(
             train_sampler.set_epoch(epoch)
         if "ScheduleFree" in type(optimizer).__name__:
             optimizer.train()
+
+        # fix training loader here with 
+        if data_aug_magmom:
+            from mace.data import create_random_rotation_loader
+            train_loader = create_random_rotation_loader(train_loader)
+
         train_one_epoch(
             model=model,
             loss_fn=loss_fn,

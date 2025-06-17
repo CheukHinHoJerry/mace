@@ -1,4 +1,4 @@
-from .atomic_data import AtomicData
+from .atomic_data import AtomicData, create_random_rotation_loader
 from .hdf5_dataset import HDF5Dataset, dataset_from_sharded_hdf5
 from .lmdb_dataset import LMDBDataset
 from .neighborhood import get_neighborhood
@@ -18,6 +18,7 @@ from .utils import (
 
 __all__ = [
     "get_neighborhood",
+    "create_random_rotation_loader",
     "Configuration",
     "Configurations",
     "random_train_valid_split",

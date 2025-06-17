@@ -806,6 +806,15 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str2bool,
         default=False,
     )
+
+    # optional for data augmentation
+    parser.add_argument(
+        "--data_aug_magmom",
+        help="Whether to use data agumentation on manetic moment training",
+        type=str2bool,
+        default=False,
+    )
+
     # options for using Weights and Biases for experiment tracking
     # to install see https://wandb.ai
     parser.add_argument(
