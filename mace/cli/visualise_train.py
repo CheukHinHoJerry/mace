@@ -174,7 +174,7 @@ class TrainingPlotter:
                 stage = "stage_one"
             axsTop[0].legend(loc="best")
             # Save the figure using the appropriate stage in the filename
-            filename = f"{self.results_dir[:-4]}_{head}_{stage}.png"
+            filename = f"{self.results_dir[:-4]}_{head}_{stage}_{model_epoch}.png"
 
             fig.savefig(filename, dpi=300, bbox_inches="tight")
             plt.close(fig)
