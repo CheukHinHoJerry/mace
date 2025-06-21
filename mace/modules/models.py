@@ -1361,7 +1361,7 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
     ):
         super().__init__(**kwargs)
         self.scale_shift = ScaleShiftBlock(
-            scale=atomic_inter_scale, shift=atomic_inter_shift
+            scale=atomic_inter_scale, shift=0.0
         )
 
         # modify spherical to solid harmonics for magnetic moment
