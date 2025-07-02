@@ -3587,7 +3587,7 @@ class EnergyDipolesMACE(torch.nn.Module):
 class MagneticSCFMACE(torch.nn.Module):
     def __init__(self, model, n_scf_step=10, scf_tol=1e-5, scf_logging=False, scf_step_size=1.0, use_scf = True):
         super().__init__()
-        self.magmom_mace = model
+        self.magmom_mace = model # original magnetic mace
         self.n_scf_step = n_scf_step
         self.scf_tol = scf_tol
         self.cache_magmom = None
@@ -3625,7 +3625,8 @@ class MagneticSCFMACE(torch.nn.Module):
 
         # === Define optimizer ===
         if self.use_scf:
-            optimizer = torch.optim.LBFGS([magmom], max_iter=self.n_scf_step, tolerance_grad=self.scf_tol, line_search_fn="strong_wolfe", lr=self.scf_step_size)
+            optimizer = torch.optim.LBFGS([magmom], max_iter=self.n_scf_step, tolerance_grad=self.scf_tol, \
+                                          line_search_fn="strong_wolfe", lr=self.scf_step_size)
 
             def closure():
                 optimizer.zero_grad()

@@ -719,6 +719,9 @@ class MagneticMACECalculator(Calculator):
                     ret_tensors["stress"][i] = out["stress"].detach()
             if self.model_type in ["DipoleMACE", "EnergyDipoleMACE"]:
                 ret_tensors["dipole"][i] = out["dipole"].detach()
+            if "equilibrated_magmom" in out.keys():
+                assert len(self.models) == 1, "magnetic mace committee not supported"
+                ret_tensors["dft_magmom"] = out["equilibrated_magmom"].detach()
 
         self.results = {}
         if self.model_type in ["MACE", "EnergyDipoleMACE"]:
@@ -735,6 +738,10 @@ class MagneticMACECalculator(Calculator):
                 * self.energy_units_to_eV
                 / self.length_units_to_A
             )
+            if "dft_magmom" in ret_tensors.keys():
+                #self.results['dft_magmom'] = torch.mean(ret_tensors["dft_magmom"], dim=0).cpu().numpy()
+                self.results['dft_magmom'] = ret_tensors["dft_magmom"].cpu().numpy()
+            
             if self.num_models > 1:
                 self.results["energies"] = (
                     ret_tensors["energies"].cpu().numpy() * self.energy_units_to_eV
@@ -774,6 +781,8 @@ class MagneticMACECalculator(Calculator):
                     .cpu()
                     .numpy()
                 )
+        # modify this inpalce
+        atoms.arrays['dft_magmom'] = self.results["dft_magmom"]
 
     def get_hessian(self, atoms=None):
         if atoms is None and self.atoms is None:
