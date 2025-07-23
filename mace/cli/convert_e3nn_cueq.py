@@ -164,6 +164,12 @@ def run(
         optimize_all=True,
     )
 
+    # remove magnetic model configuration if the model is not 
+    # for magnetism
+    if "Magnetic" not in str(source_model.__class__):
+        config.pop("m_max", None)
+        config.pop("max_m_ell", None)
+        config.pop("num_mag_radial_basis", None)
     # Create new model with cuequivariance config
     logging.info("Creating new model with cuequivariance settings")
     target_model = source_model.__class__(**config).to(device)
