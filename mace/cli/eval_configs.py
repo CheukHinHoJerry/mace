@@ -67,6 +67,13 @@ def parse_args() -> argparse.Namespace:
         required=False,
         default=None,
     )
+    parser.add_argument(
+        "--magmom_key",
+        help="key for getting magnetic moment",
+        type=str,
+        required=True,
+        default=None,
+    )
     return parser.parse_args()
 
 
@@ -93,7 +100,7 @@ def run(args: argparse.Namespace) -> None:
     if args.head is not None:
         for atoms in atoms_list:
             atoms.info["head"] = args.head
-    configs = [data.config_from_atoms(atoms, magmom_key = 'dft_magmom') for atoms in atoms_list]
+    configs = [data.config_from_atoms(atoms, magmom_key = args.magmom_key) for atoms in atoms_list]
 
     z_table = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
 

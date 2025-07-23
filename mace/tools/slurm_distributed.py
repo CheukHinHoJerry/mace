@@ -19,19 +19,45 @@ class DistributedEnvironment:
         self.local_rank = int(os.environ["LOCAL_RANK"])
         self.rank = int(os.environ["RANK"])
 
+    # def _setup_distr_env(self):
+    #     hostname = hostlist.expand_hostlist(os.environ.get("SLURM_JOB_NODELIST", "localhost"))[0]
+    #     os.environ["MASTER_ADDR"] = hostname
+    #     os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "33333")
+    #     os.environ["WORLD_SIZE"] = os.environ.get(
+    #         "SLURM_NTASKS",
+    #         str(
+    #             int(os.environ["SLURM_NTASKS_PER_NODE"])
+    #             * int(os.environ["SLURM_NNODES"])
+    #         ),
+    #     )
+    #     os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+    #     os.environ["RANK"] = os.environ["SLURM_PROCID"]
+
     def _setup_distr_env(self):
-        hostname = hostlist.expand_hostlist(os.environ["SLURM_JOB_NODELIST"])[0]
+        # Use SLURM job nodelist if available, otherwise default to localhost
+        hostname = hostlist.expand_hostlist(
+            os.environ.get("SLURM_JOB_NODELIST", "localhost")
+        )[0]
         os.environ["MASTER_ADDR"] = hostname
         os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "33333")
-        os.environ["WORLD_SIZE"] = os.environ.get(
-            "SLURM_NTASKS",
-            str(
-                int(os.environ["SLURM_NTASKS_PER_NODE"])
-                * int(os.environ["SLURM_NNODES"])
-            ),
-        )
-        os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
-        os.environ["RANK"] = os.environ["SLURM_PROCID"]
+
+        # WORLD_SIZE
+        if "SLURM_NTASKS" in os.environ:
+            os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
+        elif "WORLD_SIZE" not in os.environ:
+            os.environ["WORLD_SIZE"] = "1"
+
+        # LOCAL_RANK
+        if "SLURM_LOCALID" in os.environ:
+            os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+        elif "LOCAL_RANK" not in os.environ:
+            os.environ["LOCAL_RANK"] = "0"
+
+        # RANK
+        if "SLURM_PROCID" in os.environ:
+            os.environ["RANK"] = os.environ["SLURM_PROCID"]
+        elif "RANK" not in os.environ:
+            os.environ["RANK"] = "0"
 
     def __repr__(self):
         return (
