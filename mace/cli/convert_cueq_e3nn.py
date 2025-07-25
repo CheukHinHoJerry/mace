@@ -169,6 +169,11 @@ def run(input_model, output_model="_e3nn.model", device="cpu", return_model=True
     # Remove CuEq config
     config.pop("cueq_config", None)
 
+    if "Magnetic" not in str(source_model.__class__):
+        config.pop("m_max", None)
+        config.pop("max_m_ell", None)
+        config.pop("num_mag_radial_basis", None)
+
     # Create new model without CuEq config
     logging.info("Creating new model without CuEq settings")
     target_model = source_model.__class__(**config)
