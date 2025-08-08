@@ -602,10 +602,12 @@ class MagneticMACECalculator(Calculator):
         )
         self.charges_key = charges_key
         self.magmom_key = magmom_key
+        
         try:
-            self.heads = self.models[0].heads
+            self.heads = self.models[0].magmom_mace.heads
         except AttributeError:
             self.heads = ["Default"]
+        print(f"inside cal, {self.heads}")
         model_dtype = get_model_dtype(self.models[0])
         if default_dtype == "":
             print(
