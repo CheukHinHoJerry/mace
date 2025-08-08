@@ -340,10 +340,11 @@ def run(args) -> None:
             pt_virials_key = args.pt_virials_key or args.virials_key
             pt_dipole_key = args.pt_dipole_key or args.dipole_key
             pt_charges_key = args.pt_charges_key or args.charges_key
+            pt_magmom_key = args.pt_magmom_key or args.magmom_key
 
             logging.info(
                 f"Using the following keys for pt_head: energy={pt_energy_key}, forces={pt_forces_key}, "
-                f"stress={pt_stress_key}, virials={pt_virials_key}, dipole={pt_dipole_key}, charges={pt_charges_key}"
+                f"stress={pt_stress_key}, virials={pt_virials_key}, dipole={pt_dipole_key}, charges={pt_charges_key}, magmom={pt_magmom_key}"
             )
 
             # Normalize file paths
@@ -369,6 +370,7 @@ def run(args) -> None:
                 virials_key=pt_virials_key,
                 dipole_key=pt_dipole_key,
                 charges_key=pt_charges_key,
+                magmom_key=pt_magmom_key,
                 keep_isolated_atoms=args.keep_isolated_atoms,
                 avg_num_neighbors=model_foundation.interactions[0].avg_num_neighbors,
                 compute_avg_num_neighbors=False,
@@ -390,6 +392,7 @@ def run(args) -> None:
                     virials_key=pt_virials_key,
                     dipole_key=pt_dipole_key,
                     charges_key=pt_charges_key,
+                    magmom_key=pt_magmom_key,
                     head_name="pt_head",
                     keep_isolated_atoms=args.keep_isolated_atoms,
                 )

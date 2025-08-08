@@ -11,7 +11,8 @@ import ase.io
 import numpy as np
 import torch
 
-from mace.calculators import MACECalculator, mace_mp
+from mace.calculators import MACECalculator, MagneticMACECalculator, mace_mp
+from mace.modules import MagneticSCFMACE
 
 try:
     import fpsample
@@ -99,6 +100,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
     )
+    parser.add_argument(
+        "--magmom_key_pt",
+        help="mangetic moment key, needed for magnetic MACE to rewrite magmom as dft_magmom to be used by calc",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--magmom_key_ft",
+        help="mangetic moment key, needed for magnetic MACE to rewrite magmom as dft_magmom to be used by calc",
+        type=str,
+        default=None,
+    )
     parser.add_argument("--seed", help="random seed", type=int, default=42)
     return parser.parse_args()
 
@@ -114,6 +127,11 @@ def calculate_descriptors(atoms: List[ase.Atoms], calc: MACECalculator) -> None:
         }
         mol.info["mace_descriptors"] = descriptors_dict
 
+def init_magnetic_mace_wrapper(PATH, device="cpu", default_dtype="float64"):
+    model = torch.load(PATH, map_location = device, weights_only = False).to(device)
+    magmom_maceeq = MagneticSCFMACE(model, use_scf=False)
+    calc = MagneticMACECalculator(models = [magmom_maceeq,], device = device, default_dtype=default_dtype)
+    return calc
 
 def filter_atoms(
     atoms: ase.Atoms, element_subset: List[str], filtering_type: str
@@ -202,6 +220,17 @@ class FPS:
                     descriptors[z]
                 ).astype(np.float32)
 
+def set_magmom(ats, magmom_key = None):
+    N_configs = len(ats)
+    have_magmom = 0
+    if magmom_key == None:
+        return ats
+    else:
+        for at in ats:
+            at.arrays['dft_magmom'] = at.arrays[magmom_key]
+            have_magmom += 1
+    print(f"Found magnetic moment in {have_magmom} number of configs in {N_configs}.")
+    return ats
 
 def select_samples(
     args: argparse.Namespace,
@@ -211,15 +240,20 @@ def select_samples(
     if args.model in ["small", "medium", "large"]:
         calc = mace_mp(args.model, device=args.device, default_dtype=args.default_dtype)
     else:
-        calc = MACECalculator(
-            model_paths=args.model, device=args.device, default_dtype=args.default_dtype
-        )
+        if args.magmom_key_ft != None and args.magmom_key_pt != None:
+            calc = init_magnetic_mace_wrapper(args.model, device = args.device, default_dtype=args.default_dtype)
+        else:
+            calc = MACECalculator(
+                model_paths=args.model, device=args.device, default_dtype=args.default_dtype
+            )
     if isinstance(args.configs_ft, str):
         atoms_list_ft = ase.io.read(args.configs_ft, index=":")
+        atoms_list_ft = set_magmom(atoms_list_ft, args.magmom_key_ft)
     else:
         atoms_list_ft = []
         for path in args.configs_ft:
-            atoms_list_ft += ase.io.read(path, index=":")
+            atoms_list_ft += set_magmom(ase.io.read(path, index=":"), args.magmom_key_ft)
+            
 
     if args.filtering_type is not None:
         all_species_ft = np.unique([x.symbol for atoms in atoms_list_ft for x in atoms])
@@ -262,7 +296,7 @@ def select_samples(
             atoms_list_pt = atoms_list_pt_filtered
 
     else:
-        atoms_list_pt = ase.io.read(args.configs_pt, index=":")
+        atoms_list_pt = set_magmom(ase.io.read(args.configs_pt, index=":"), magmom_key=args.magmom_key_pt)
         if args.descriptors is not None:
             logging.info(
                 f"Loading descriptors for the pretraining set from {args.descriptors}"

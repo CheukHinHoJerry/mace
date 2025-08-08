@@ -556,6 +556,20 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        "--pt_magmom_key",
+        help="Key of magnetic moment in training xyz",
+        type=str,
+        default="REF_magmom",
+    )
+    parser.add_argument(
+        "--pt_magforces_key",
+        help="Key of magnetic forces in training xyz",
+        type=str,
+        default="REF_magforces",
+    )
+
+
+    parser.add_argument(
         "--skip_evaluate_heads",
         help="Comma-separated list of heads to skip during final evaluation",
         type=str,
@@ -904,7 +918,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--train_one_body_contribution",
         type=str2bool,
-        default=True
+        default=False
     )
 
     return parser

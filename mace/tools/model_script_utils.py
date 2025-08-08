@@ -71,7 +71,7 @@ def configure_model(
         )
 
     # Build model
-    if model_foundation is not None and args.model in ["MACE", "ScaleShiftMACE"]:
+    if model_foundation is not None and (args.model in ["MACE", "ScaleShiftMACE"] or "Magnetic" in args.model):
         logging.info("Loading FOUNDATION model")
         model_config_foundation = extract_config_mace_model(model_foundation)
         model_config_foundation["atomic_energies"] = atomic_energies
@@ -101,7 +101,10 @@ def configure_model(
             )
         model_config_foundation["atomic_inter_scale"] = [1.0] * len(heads)
         args.avg_num_neighbors = model_config_foundation["avg_num_neighbors"]
-        args.model = "FoundationMACE"
+        if "Magnetic" not in args.model:
+            args.model = "FoundationMACE"
+        else:
+            args.model = "MagneticFoundationMACE"
         model_config_foundation["heads"] = heads
         model_config = model_config_foundation
 
@@ -194,7 +197,10 @@ def _build_model(
     args, model_config, model_config_foundation, heads
 ):  # pylint: disable=too-many-return-statements
 
-
+    if args.model == "MagneticFoundationMACE":
+        return modules.MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(
+            **model_config_foundation
+        )
     if args.model == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE":
         return modules.MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE(
             **model_config,
@@ -411,6 +417,10 @@ def _build_model(
             heads=heads,
         )
     if args.model == "FoundationMACE":
+        model_config_foundation.pop("m_max", None)
+        model_config_foundation.pop("max_m_ell", None)
+        model_config_foundation.pop("num_mag_radial_basis", None)
+        
         return modules.ScaleShiftMACE(**model_config_foundation)
     if args.model == "ScaleShiftBOTNet":
         return modules.ScaleShiftBOTNet(
