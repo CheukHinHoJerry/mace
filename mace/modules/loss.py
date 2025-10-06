@@ -385,6 +385,12 @@ class UniversalLoss(torch.nn.Module):
             "stress_weight",
             torch.tensor(stress_weight, dtype=torch.get_default_dtype()),
         )
+        self.register_buffer(
+            "hessian_weight",
+            torch.tensor(1.0, dtype=torch.get_default_dtype()),
+        )
+
+        self.train_hessian = True
 
     def forward(
         self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
@@ -395,6 +401,9 @@ class UniversalLoss(torch.nn.Module):
         configs_forces_weight = torch.repeat_interleave(
             ref.forces_weight, ref.ptr[1:] - ref.ptr[:-1]
         ).unsqueeze(-1)
+        configs_hessian_weight = torch.repeat_interleave(
+            ref.hessian_weight, ref.ptr[1:] - ref.ptr[:-1]
+        )
         if ddp:
             loss_energy = torch.nn.functional.huber_loss(
                 configs_energy_weight * ref["energy"] / num_atoms,
@@ -435,10 +444,27 @@ class UniversalLoss(torch.nn.Module):
                 reduction="mean",
                 delta=self.huber_delta,
             )
+                    
+            if self.train_hessian:
+                configs_hessian_weight = 1
+                print("=====")
+                print(ref["hessian"].shape)
+                print(pred["hessian"].shape)
+                print("=====")
+                loss_hessian = torch.nn.functional.huber_loss(
+                    configs_hessian_weight * ref["hessian"],
+                    configs_hessian_weight * pred["hessian"],
+                    reduction="mean",
+                    delta=self.huber_delta,
+                )
+            else:
+                loss_hessian = 0
+        print("loss hessian: ", loss_hessian)
         return (
             self.energy_weight * loss_energy
             + self.forces_weight * loss_forces
             + self.stress_weight * loss_stress
+            + self.hessian_weight * loss_hessian
         )
 
     def __repr__(self):

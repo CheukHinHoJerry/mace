@@ -38,6 +38,7 @@ class AtomicData(torch_geometric.data.Data):
     virials: torch.Tensor
     dipole: torch.Tensor
     charges: torch.Tensor
+    hessian: torch.Tensor # hessian
     total_charge: torch.Tensor
     total_spin: torch.Tensor
     weight: torch.Tensor
@@ -47,6 +48,7 @@ class AtomicData(torch_geometric.data.Data):
     virials_weight: torch.Tensor
     dipole_weight: torch.Tensor
     charges_weight: torch.Tensor
+    hessian_weight: torch.Tensor
 
     def __init__(
         self,
@@ -64,12 +66,14 @@ class AtomicData(torch_geometric.data.Data):
         virials_weight: Optional[torch.Tensor],  # [,]
         dipole_weight: Optional[torch.Tensor],  # [,]
         charges_weight: Optional[torch.Tensor],  # [,]
+        hessian_weight: Optional[torch.Tensor],  # [,]
         forces: Optional[torch.Tensor],  # [n_nodes, 3]
         energy: Optional[torch.Tensor],  # [, ]
         stress: Optional[torch.Tensor],  # [1,3,3]
         virials: Optional[torch.Tensor],  # [1,3,3]
         dipole: Optional[torch.Tensor],  # [, 3]
         charges: Optional[torch.Tensor],  # [n_nodes, ]
+        hessian: Optional[torch.Tensor], # [n_nodes, ]
         elec_temp: Optional[torch.Tensor],  # [,]
         total_charge: Optional[torch.Tensor] = None,  # [,]
         total_spin: Optional[torch.Tensor] = None,  # [,]
@@ -90,6 +94,7 @@ class AtomicData(torch_geometric.data.Data):
         assert virials_weight is None or len(virials_weight.shape) == 0
         assert dipole_weight is None or dipole_weight.shape == (1, 3), dipole_weight
         assert charges_weight is None or len(charges_weight.shape) == 0
+        assert hessian_weight is None or len(hessian_weight.shape) == 0
         assert cell is None or cell.shape == (3, 3)
         assert forces is None or forces.shape == (num_nodes, 3)
         assert energy is None or len(energy.shape) == 0
@@ -100,6 +105,10 @@ class AtomicData(torch_geometric.data.Data):
         assert elec_temp is None or len(elec_temp.shape) == 0
         assert total_charge is None or len(total_charge.shape) == 0
         assert total_spin is None or len(total_spin.shape) == 0
+        # 
+        # print("hessian.shape: ", hessian.shape)
+        assert hessian is None or hessian.shape == (num_nodes * 3, num_nodes, 3)
+
         # Aggregate data
         data = {
             "num_nodes": num_nodes,
@@ -117,6 +126,7 @@ class AtomicData(torch_geometric.data.Data):
             "virials_weight": virials_weight,
             "dipole_weight": dipole_weight,
             "charges_weight": charges_weight,
+            "hessian_weight": hessian_weight,
             "forces": forces,
             "energy": energy,
             "stress": stress,
@@ -126,6 +136,7 @@ class AtomicData(torch_geometric.data.Data):
             "elec_temp": elec_temp,
             "total_charge": total_charge,
             "total_spin": total_spin,
+            "hessian": hessian,
         }
         super().__init__(**data)
 
@@ -226,6 +237,18 @@ class AtomicData(torch_geometric.data.Data):
             else torch.tensor(1.0, dtype=torch.get_default_dtype())
         )
 
+        
+        hessian_weight = (
+            torch.tensor(
+                config.property_weights.get("hessian"), dtype=torch.get_default_dtype()
+            )
+            if config.property_weights.get("hessian") is not None
+            else torch.tensor(1.0, dtype=torch.get_default_dtype())
+        )
+
+        print("hessian weight shape: ", hessian_weight.shape)
+        print("hessian weight: ", hessian_weight)
+
         forces = (
             torch.tensor(
                 config.properties.get("forces"), dtype=torch.get_default_dtype()
@@ -272,6 +295,13 @@ class AtomicData(torch_geometric.data.Data):
             if config.properties.get("charges") is not None
             else torch.zeros(num_atoms, dtype=torch.get_default_dtype())
         )
+        hessian = (
+            torch.tensor(
+                config.properties.get("hessian"), dtype=torch.get_default_dtype()
+            )
+            if config.properties.get("hessian") is not None
+            else torch.zeros(num_atoms * 3, num_atoms * 3, dtype=torch.get_default_dtype())
+        )
         elec_temp = (
             torch.tensor(
                 config.properties.get("elec_temp"),
@@ -311,12 +341,14 @@ class AtomicData(torch_geometric.data.Data):
             virials_weight=virials_weight,
             dipole_weight=dipole_weight,
             charges_weight=charges_weight,
+            hessian_weight=hessian_weight,
             forces=forces,
             energy=energy,
             stress=stress,
             virials=virials,
             dipole=dipole,
             charges=charges,
+            hessian=hessian,
             elec_temp=elec_temp,
             total_charge=total_charge,
             total_spin=total_spin,

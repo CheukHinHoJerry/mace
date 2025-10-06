@@ -437,6 +437,7 @@ class ScaleShiftMACE(MACE):
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
+        self.compute_hessian = True
 
     def forward(
         self,
@@ -446,7 +447,8 @@ class ScaleShiftMACE(MACE):
         compute_virials: bool = False,
         compute_stress: bool = False,
         compute_displacement: bool = False,
-        compute_hessian: bool = False,
+        #compute_hessian: bool = False,
+        compute_hessian: bool = True,
         compute_edge_forces: bool = False,
         compute_atomic_stresses: bool = False,
         lammps_mliap: bool = False,
@@ -574,7 +576,15 @@ class ScaleShiftMACE(MACE):
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
             compute_edge_forces=compute_edge_forces or compute_atomic_stresses,
+            graph_sizes = data['ptr'][1:] - data['ptr'][:-1],
         )
+        print("=====")
+        # print("shape of forces and hessian during inference:")
+        # print(num_graphs)
+        # print(total_energy.shape)
+        # print(forces.shape)
+        # #print(hessian.shape)
+        print("=====")
 
         atomic_virials: Optional[torch.Tensor] = None
         atomic_stresses: Optional[torch.Tensor] = None

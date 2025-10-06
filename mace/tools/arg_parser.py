@@ -520,6 +520,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=DefaultKeys.CHARGES.value,
     )
     parser.add_argument(
+        "--hessian_key",
+        help="Key of atomic charges in training xyz",
+        type=str,
+        default=DefaultKeys.CHARGES.value,
+    )
+    parser.add_argument(
         "--elec_temp_key",
         help="Key of electronic temperature in training xyz",
         type=str,

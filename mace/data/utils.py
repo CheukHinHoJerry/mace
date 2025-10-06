@@ -54,6 +54,7 @@ def update_keyspec_from_kwargs(
         "stress_key",
         "virials_key",
         "dipole_key",
+        "hessian_key",
         "head_key",
         "elec_temp_key",
         "total_charge_key",
@@ -223,6 +224,7 @@ def load_from_xyz(
     forces_key = key_specification.arrays_keys["forces"]
     stress_key = key_specification.info_keys["stress"]
     head_key = key_specification.info_keys["head"]
+
     if energy_key == "energy":
         logging.warning(
             "Since ASE version 3.23.0b1, using energy_key 'energy' is no longer safe when communicating between MACE and ASE. We recommend using a different key, rewriting 'energy' to 'REF_energy'. You need to use --energy_key='REF_energy' to specify the chosen key name."

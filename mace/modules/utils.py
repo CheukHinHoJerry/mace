@@ -108,7 +108,7 @@ def get_symmetric_displacement(
 
 
 @torch.jit.unused
-def compute_hessians_vmap(
+def compute_hessians_vmap_single(
     forces: torch.Tensor,
     positions: torch.Tensor,
 ) -> torch.Tensor:
@@ -161,6 +161,28 @@ def compute_hessians_loop(
     hessian = torch.stack(hessian)
     return hessian
 
+def compute_hessians_from_packed(
+    forces: torch.Tensor,       # (N_total, 3)
+    positions: torch.Tensor,    # (N_total, 3)
+    graph_sizes: torch.Tensor,  # (B,)
+) -> torch.Tensor:              # (B, 3N_i, 3N_i) ragged stacked
+    """
+    Compute Hessians given packed forces/positions with graph_sizes.
+    Returns list of Hessians (cannot stack into one tensor if N_i differ).
+    """
+    hessians = []
+    start = 0
+    for n_atoms in graph_sizes.tolist():
+        end = start + n_atoms
+        f_sub = forces[start:end, :]
+        p_sub = positions[start:end, :]
+        print("f shape and p shape: ", )
+        print(f_sub.shape)
+        print(p_sub.shape)
+        hess = compute_hessians_vmap_single(f_sub, p_sub)  # (3N, 3N)
+        hessians.append(hess)
+        start = end
+    return hessians
 
 def get_outputs(
     energy: torch.Tensor,
@@ -174,6 +196,7 @@ def get_outputs(
     compute_stress: bool = True,
     compute_hessian: bool = False,
     compute_edge_forces: bool = False,
+    graph_sizes = None,
 ) -> Tuple[
     Optional[torch.Tensor],
     Optional[torch.Tensor],
@@ -202,9 +225,25 @@ def get_outputs(
         )
     else:
         forces, virials, stress = (None, None, None)
+    
+    print("celles : ", )
+    print(cell)
+    print(cell.shape)
+    n_graphs = cell.shape[0] // 3
     if compute_hessian:
         assert forces is not None, "Forces must be computed to get the hessian"
-        hessian = compute_hessians_vmap(forces, positions)
+        #hessian = compute_hessians_vmap(forces, positions)
+        if cell.shape[0] > 3:   # Batched
+            print("into batched computation of hessian")
+            hessian = compute_hessians_from_packed(forces, positions, graph_sizes)
+            
+            print(hessian[0].shape)
+            print(len(hessian))
+        else:                  # Single config
+            print("into single computation of hessian")
+            hessian = compute_hessians_vmap_single(forces, positions)
+            print(hessian.shape)
+    
     else:
         hessian = None
     if compute_edge_forces and vectors is not None:
