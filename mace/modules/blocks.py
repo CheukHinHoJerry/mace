@@ -253,6 +253,10 @@ class RadialEmbeddingBlock(torch.nn.Module):
         self.cutoff_fn = PolynomialCutoff(r_max=r_max, p=num_polynomial_cutoff)
         self.out_dim = num_bessel
 
+        # chho: new
+        self.num_polynomial_cutoff = num_polynomial_cutoff
+        
+
     def forward(
         self,
         edge_lengths: torch.Tensor,  # [n_edges, 1]
@@ -266,8 +270,12 @@ class RadialEmbeddingBlock(torch.nn.Module):
                 edge_lengths, node_attrs, edge_index, atomic_numbers
             )
         radial = self.bessel_fn(edge_lengths)  # [n_edges, n_basis]
-        if self.cutoff_fn.p != 0:
-            radial = radial * cutoff  # [n_edges, n_basis]
+        if not hasattr(self, "num_polynomial_cutoff"):
+            if self.cutoff_fn.p != 0:
+                radial = radial * cutoff  # [n_edges, n_basis]
+        else:
+            if self.num_polynomial_cutoff != 0:
+                radial = radial * cutoff  # [n_edges, n_basis]
         return radial
 
 
