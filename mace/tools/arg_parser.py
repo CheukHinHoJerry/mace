@@ -887,6 +887,13 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
 
     # --- magnetic ace ---
     parser.add_argument(
+        "--num_mag_radial_basis_one_body",
+        help="number of radial basis for one body contribution in magnetic mace",
+        type=int,
+        default=10,
+#        nargs='+',
+    )
+    parser.add_argument(
         "--m_max",
         help="|m| basis m_max for magnetic momgent",
         type=float,
@@ -900,9 +907,9 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--num_mag_radial_basis",
-        help="number of radial basis for magnetic mace",
+        help="number of radial basis for magnetic part",
         type=int,
-        default=3,
+        default=8,
     )
     parser.add_argument(
         "--contraction_cls_first",

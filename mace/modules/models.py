@@ -2147,6 +2147,7 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfM
         atomic_inter_shift: float,
         **kwargs,
     ):
+        num_mag_radial_basis_one_body = kwargs.pop("num_mag_radial_basis_one_body")
         super().__init__(**kwargs)
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=0.0
@@ -2161,27 +2162,11 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfM
         self.onebody_magmombasis_list = torch.nn.ModuleList()
 
         # coefficient for the chebyshev polynomails
-
-
-        # assume self.atomic_numbers is
-        # self.register_buffer(
-        #     "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.int64)
-        # )
-        
-        # initialize this coefficient for each species that one can 
-        # access later by an one hot embeeding of atomic numbers data["node_attrs"]
-        
-        # self.onebody_magmombasis_list = {
-        #     Z.item(): torch.nn.Parameter(torch.randn(10))
-        #     for Z in self.atomic_numbers
-        # }
-
-
-        self.onebody_magmombasis_coeffs = torch.nn.Parameter(torch.randn(len(self.atomic_numbers), 10, len(self.heads)))
+        self.onebody_magmombasis_coeffs = torch.nn.Parameter(torch.randn(len(self.atomic_numbers), num_mag_radial_basis_one_body, len(self.heads)))
 
         self.one_body_cheb_basis_with_const = ChebychevBasisWithConst(
             r_max = 1.0,
-            num_basis = 10,
+            num_basis = num_mag_radial_basis_one_body,
         )
 
         # correction to shift E0s for each species

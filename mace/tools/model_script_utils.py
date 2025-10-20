@@ -201,7 +201,7 @@ def _build_model(
         return modules.MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(
             **model_config_foundation
         )
-
+    
     if args.model == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE":
         return modules.MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE(
             **model_config,
@@ -219,6 +219,7 @@ def _build_model(
             m_max=args.m_max,
             max_m_ell=args.max_m_ell,
             num_mag_radial_basis=args.num_mag_radial_basis,
+            num_mag_radial_basis_one_body=args.num_mag_radial_basis_one_body,
         )
     if args.model == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE":
         return modules.MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE(
@@ -439,6 +440,7 @@ def _build_model(
         model_config_foundation.pop("m_max", None)
         model_config_foundation.pop("max_m_ell", None)
         model_config_foundation.pop("num_mag_radial_basis", None)
+        model_config_foundation.pop("onebody_magmombasis_coeffs", None)
         
         return modules.ScaleShiftMACE(**model_config_foundation)
     if args.model == "ScaleShiftBOTNet":

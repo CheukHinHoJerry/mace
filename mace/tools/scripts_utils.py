@@ -389,6 +389,7 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "m_max": m_max,
         "num_mag_radial_basis": num_mag_radial_basis,
         "max_m_ell": max_m_ell,
+        "num_mag_radial_basis_one_body": int(model.onebody_magmombasis_coeffs.shape[1]),
         "contraction_cls": "SymmetricContraction",
         "contraction_cls_first": "SymmetricContraction",
     }
