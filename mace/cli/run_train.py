@@ -13,6 +13,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import List, Optional
 
+import torch
+torch.serialization.add_safe_globals([slice])
+
 import torch.distributed
 from e3nn.util import jit
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -65,6 +68,322 @@ from mace.tools.scripts_utils import (
 from mace.tools.tables_utils import create_error_table
 from mace.tools.utils import AtomicNumberTable
 
+import loralib as lora
+from e3nn import nn, o3
+
+from tqdm import tqdm
+
+# ============================================================================
+# LoRA Bilinear Layer for TensorProducts
+# ============================================================================
+
+class LoRABilinear(torch.nn.Module):
+    """
+    Bilinear layer with LoRA low-rank adaptation.
+    
+    Can work in two modes:
+    1. internal_weights=True: Weight is stored internally (W_k = W0_k + A_k @ B_k)
+    2. internal_weights=False: Weight is passed as argument (like e3nn TensorProduct)
+    """
+    def __init__(self, in1_features, in2_features, out_features, r=8, internal_weights=True):
+        super().__init__()
+        self.in1 = in1_features
+        self.in2 = in2_features
+        self.out = out_features
+        self.r = r
+        self.internal_weights = internal_weights
+        
+        if internal_weights:
+            # Base weight (frozen)
+            self.weight = torch.nn.Parameter(
+                torch.randn(out_features, in1_features, in2_features),
+                requires_grad=False
+            )
+            
+            # LoRA matrices
+            self.lora_A = torch.nn.Parameter(torch.randn(out_features, in1_features, r))
+            self.lora_B = torch.nn.Parameter(torch.randn(out_features, r, in2_features))
+            
+            # Initialize for zero initial adaptation
+            torch.nn.init.kaiming_uniform_(self.lora_A)
+            torch.nn.init.zeros_(self.lora_B)
+        else:
+            # No internal weights - expect weight passed as argument
+            # Only store LoRA adaptation parameters
+            self.lora_A = torch.nn.Parameter(torch.randn(out_features, in1_features, r))
+            self.lora_B = torch.nn.Parameter(torch.randn(out_features, r, in2_features))
+            
+            torch.nn.init.kaiming_uniform_(self.lora_A)
+            torch.nn.init.zeros_(self.lora_B)
+            
+            # We need to know the weight_numel for compatibility
+            self.weight_numel = out_features * in1_features * in2_features
+        
+    def forward(self, x1, x2, weight=None):
+        """
+        Forward pass.
+        
+        Args:
+            x1: (batch, in1)
+            x2: (batch, in2)
+            weight: Optional weight tensor. Required if internal_weights=False.
+                   Shape: (weight_numel,) - flat weights that will be reshaped
+        """
+        batch_size = x1.shape[0]
+        output = torch.zeros(batch_size, self.out, device=x1.device, dtype=x1.dtype)
+        
+        if self.internal_weights:
+            # Use internal weights + LoRA adaptation
+            for k in range(self.out):
+                W_k = self.weight[k] + self.lora_A[k] @ self.lora_B[k]
+                output[:, k] = torch.sum(
+                    x1.unsqueeze(2) * W_k.unsqueeze(0) * x2.unsqueeze(1),
+                    dim=(1, 2)
+                )
+        else:
+            # Weight passed as argument + LoRA adaptation
+            if weight is None:
+                raise RuntimeError("Weight must be provided when internal_weights=False")
+            
+            # Reshape flat weight to (out, in1, in2)
+            weight_reshaped = weight.view(self.out, self.in1, self.in2)
+            
+            for k in range(self.out):
+                W_k = weight_reshaped[k] + self.lora_A[k] @ self.lora_B[k]
+                output[:, k] = torch.sum(
+                    x1.unsqueeze(2) * W_k.unsqueeze(0) * x2.unsqueeze(1),
+                    dim=(1, 2)
+                )
+        
+        return output
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def extract_dense_weight(o3_linear):
+    """Convert e3nn.o3.Linear into a dense weight matrix."""
+    in_features = o3_linear.irreps_in.dim
+    out_features = o3_linear.irreps_out.dim
+
+    param = next(o3_linear.parameters(), None)
+    dtype = param.dtype if param is not None else torch.get_default_dtype()
+    device = param.device if param is not None else torch.device("cpu")
+
+    W = []
+    with torch.no_grad():
+        for i in range(in_features):
+            x = torch.zeros(1, in_features, dtype=dtype, device=device)
+            x[0, i] = 1.0
+            y = o3_linear(x)
+            W.append(y[0].to(device=device, dtype=dtype))
+        W = torch.stack(W, dim=1)
+    return W
+
+
+# def extract_bilinear_weight(tensor_product):
+#     """Extract bilinear weights from e3nn TensorProduct."""
+#     in1_dim = tensor_product.irreps_in1.dim
+#     in2_dim = tensor_product.irreps_in2.dim
+#     out_dim = tensor_product.irreps_out.dim
+    
+#     param = next(tensor_product.parameters(), None)
+#     dtype = param.dtype if param is not None else torch.get_default_dtype()
+#     device = param.device if param is not None else torch.device("cpu")
+    
+#     weight = torch.zeros(out_dim, in1_dim, in2_dim, dtype=dtype, device=device)
+    
+#     with torch.no_grad():
+#         for k in range(out_dim):
+#             for i in range(in1_dim):
+#                 for j in range(in2_dim):
+#                     x1_basis = torch.zeros(1, in1_dim, dtype=dtype, device=device)
+#                     x2_basis = torch.zeros(1, in2_dim, dtype=dtype, device=device)
+#                     x1_basis[0, i] = 1.0
+#                     x2_basis[0, j] = 1.0
+                    
+#                     output = tensor_product(x1_basis, x2_basis)
+#                     weight[k, i, j] = output[0, k]
+    
+#     return weight
+
+def extract_bilinear_weight(tp):
+    """Efficiently extract bilinear weights from an e3nn TensorProduct."""
+    in1_dim = tp.irreps_in1.dim
+    in2_dim = tp.irreps_in2.dim
+    out_dim = tp.irreps_out.dim
+    
+    param = next(tp.parameters(), None)
+    dtype = param.dtype if param is not None else torch.get_default_dtype()
+    device = param.device if param is not None else torch.device("cpu")
+
+    # Build all basis combinations in one go
+    I, J = torch.meshgrid(
+        torch.arange(in1_dim, device=device),
+        torch.arange(in2_dim, device=device),
+        indexing="ij"
+    )
+    n_pairs = I.numel()
+
+    x1 = torch.zeros(n_pairs, in1_dim, dtype=dtype, device=device)
+    x2 = torch.zeros(n_pairs, in2_dim, dtype=dtype, device=device)
+    x1[torch.arange(n_pairs), I.reshape(-1)] = 1.0
+    x2[torch.arange(n_pairs), J.reshape(-1)] = 1.0
+
+    with torch.no_grad():
+        out = tp(x1, x2)  # (n_pairs, out_dim)
+
+    # Reshape to (out_dim, in1_dim, in2_dim)
+    weight = out.T.reshape(out_dim, in1_dim, in2_dim)
+    return weight
+
+# ============================================================================
+# Replacement Functions
+# ============================================================================
+
+def replace_o3_linear_with_lora(module, rank=16, verbose=True):
+    """Replace all e3nn.o3.Linear layers with lora.Linear."""
+    for name, child in list(module.named_children()):
+        replace_o3_linear_with_lora(child, rank=rank, verbose=verbose)
+
+        if isinstance(child, o3.Linear):
+            in_features = child.irreps_in.dim
+            out_features = child.irreps_out.dim
+
+            param = next(child.parameters(), None)
+            dtype = param.dtype if param is not None else torch.get_default_dtype()
+            device = param.device if param is not None else torch.device("cpu")
+
+            new_layer = lora.Linear(
+                in_features, out_features, bias=False, r=rank
+            ).to(device=device, dtype=dtype)
+
+            with torch.no_grad():
+                W = extract_dense_weight(child)
+                new_layer.weight.copy_(W)
+
+            setattr(module, name, new_layer)
+
+            if verbose:
+                print(f"[Replaced] {name}: o3.Linear({in_features}->{out_features}) → LoRA(r={rank})")
+
+
+def replace_tensor_product_with_lora(module, rank=16, verbose=True):
+    """Replace TensorProduct and FullyConnectedTensorProduct with LoRA Bilinear."""
+    for name, child in list(module.named_children()):
+        replace_tensor_product_with_lora(child, rank=rank, verbose=verbose)
+
+        if isinstance(child, (o3.TensorProduct, o3.FullyConnectedTensorProduct)):
+            # Check if TensorProduct has internal weights
+            # Only replace if it's a FullyConnectedTensorProduct or has internal_weights=True
+            if not isinstance(child, o3.FullyConnectedTensorProduct):
+                # Regular TensorProduct - check if it has internal weights
+                if not getattr(child, 'internal_weights', False):
+                    if verbose:
+                        print(f"[Skipped] {name}: TensorProduct without internal weights (cannot replace)")
+                    continue
+            
+            in1_features = child.irreps_in1.dim
+            in2_features = child.irreps_in2.dim
+            out_features = child.irreps_out.dim
+
+            param = next(child.parameters(), None)
+            dtype = param.dtype if param is not None else torch.get_default_dtype()
+            device = param.device if param is not None else torch.device("cpu")
+
+            new_layer = LoRABilinear(
+                in1_features, in2_features, out_features, r=rank
+            ).to(device=device, dtype=dtype)
+
+            with torch.no_grad():
+                W = extract_bilinear_weight(child)
+                new_layer.weight.copy_(W)
+
+            setattr(module, name, new_layer)
+
+            if verbose:
+                print(f"[Replaced] {name}: TensorProduct({in1_features},{in2_features}->{out_features}) → LoRA Bilinear(r={rank})")
+
+# ============================================================================
+# Main Replacement Function
+# ============================================================================
+
+def replace_all_with_lora(module, linear_rank=16, tp_rank=16, verbose=True):
+    """
+    Replace all e3nn layers with LoRA equivalents:
+    - o3.Linear → lora.Linear
+    - TensorProduct/FullyConnectedTensorProduct → LoRA Bilinear
+    - FullyConnectedNet → LoRA MLP
+    """
+    if verbose:
+        print("=" * 70)
+        print("Replacing e3nn layers with LoRA equivalents")
+        print("=" * 70)
+    
+    # Replace in order: FCN first (contains Linear), then TensorProduct, then Linear
+    # replace_fcn_with_lora(module, rank=fcn_rank, verbose=verbose)
+    replace_o3_linear_with_lora(module, rank=linear_rank, verbose=verbose)
+    replace_tensor_product_with_lora(module, rank=tp_rank, verbose=verbose)
+    
+    if verbose:
+        print("=" * 70)
+        print("Replacement complete")
+        print("=" * 70)
+
+
+# def extract_dense_weight(o3_linear):
+#     """Convert e3nn.o3.Linear into a dense (out_features × in_features) weight matrix,
+#     preserving the layer's dtype and device."""
+#     in_features = o3_linear.irreps_in.dim
+#     out_features = o3_linear.irreps_out.dim
+
+#     # Detect dtype and device from layer
+#     param = next(o3_linear.parameters(), None)
+#     dtype = param.dtype if param is not None else torch.get_default_dtype()
+#     device = param.device if param is not None else torch.device("cpu")
+
+#     W = []
+#     with torch.no_grad():
+#         for i in range(in_features):
+#             x = torch.zeros(1, in_features, dtype=dtype, device=device)
+#             x[0, i] = 1.0
+#             y = o3_linear(x)
+#             W.append(y[0].to(device=device, dtype=dtype))
+#         W = torch.stack(W, dim=1)
+#     return W
+
+
+# def replace_o3_linear_with_lora(module, rank=16, verbose=True):
+#     """
+#     Recursively replace all e3nn.o3.Linear layers in a module with lora.Linear.
+#     Keeps the same dtype/device as the original layer.
+#     """
+#     for name, child in list(module.named_children()):
+#         # Recurse into submodules first
+#         replace_o3_linear_with_lora(child, rank=rank, verbose=verbose)
+
+#         if isinstance(child, o3.Linear):
+#             in_features = child.irreps_in.dim
+#             out_features = child.irreps_out.dim
+
+#             # Detect device/dtype from the child
+#             param = next(child.parameters(), None)
+#             dtype = param.dtype if param is not None else torch.get_default_dtype()
+#             device = param.device if param is not None else torch.device("cpu")
+
+#             # Create equivalent LoRA Linear on the same device/dtype
+#             new_layer = lora.Linear(in_features, out_features, bias=False, r=rank).to(device=device, dtype=dtype)
+
+#             # Copy dense weight
+#             with torch.no_grad():
+#                 W = extract_dense_weight(child)
+#                 new_layer.weight.copy_(W)
+
+#             setattr(module, name, new_layer)
+
+#             if verbose:
+#                 print(f"[Replaced] {name}: o3.Linear({in_features}->{out_features}) → LoRA(r={rank}) [{device}, {dtype}]")
 
 def main() -> None:
     """
@@ -141,7 +460,7 @@ def run(args) -> None:
             model_foundation = calc.models[0]
         else:
             model_foundation = torch.load(
-                args.foundation_model, map_location=args.device
+                args.foundation_model, map_location=args.device, weights_only=False,
             )
             logging.info(
                 f"Using foundation model {args.foundation_model} as initial checkpoint."
@@ -652,6 +971,13 @@ def run(args) -> None:
         logging.info("Converting model to CUEQ for accelerated training")
         assert model.__class__.__name__ in ["MACE", "ScaleShiftMACE"]
         model = run_e3nn_to_cueq(deepcopy(model), device=device)
+    
+    param_size = 0
+    for name, param in model.named_parameters():
+        if "lora" in name or "LoRA" in name or "radial_embedding" in name or ("symmetric_contractions" in name and "weights_max" not in name):
+            param_size += param.numel()
+    logging.info(f"Number of trainable parameters: {param_size}")
+
     # Optimizer
     param_options = get_params_options(args, model)
     optimizer: torch.optim.Optimizer
@@ -760,6 +1086,14 @@ def run(args) -> None:
         logging.info("DRY RUN mode enabled. Stopping now.")
         return
 
+    # replace with lora for linear layer and tp layers
+    # fully conencted are done with original implementation
+    replace_all_with_lora(model)
+    param_size = 0
+    for name, param in model.named_parameters():
+        if "lora" in name or "LoRA" in name or "radial_embedding" in name or ("symmetric_contractions" in name and "weights_max" not in name):
+            param_size += param.numel()
+    logging.info(f"Number of trainable parameters after lora update: {param_size}")
 
     tools.train(
         model=model,
