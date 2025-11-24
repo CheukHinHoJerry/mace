@@ -227,8 +227,20 @@ def train(
 
         # fix training loader here with 
         if data_aug_magmom:
-            from mace.data import create_random_rotation_loader
-            train_loader = create_random_rotation_loader(train_loader)
+            from mace.data import create_random_rotation_dataset
+            # Avoid stacking transforms
+            if not 'TransformedDataset' == type(train_loader.dataset).__name__:
+                dataset_aug = create_random_rotation_dataset(train_loader.dataset)
+
+                # Rebuild loader from dataset
+                train_loader = torch.utils.data.DataLoader(
+                    dataset_aug,
+                    batch_size=train_loader.batch_size,
+                    shuffle=True,
+                    num_workers=train_loader.num_workers,
+                    pin_memory=True,
+                    collate_fn=train_loader.collate_fn,
+                )
 
         train_one_epoch(
             model=model,

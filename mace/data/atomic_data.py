@@ -200,7 +200,6 @@ class AtomicData(torch_geometric.data.Data):
             else 1
         )
 
-
         forces = (
             torch.tensor(config.forces, dtype=torch.get_default_dtype())
             if config.forces is not None
@@ -323,6 +322,36 @@ class Random3DRotation(BaseTransform):
             data.magmom = torch.matmul(data.magmom, R.T)
 
         return data
+
+def create_random_rotation_dataset(dataset):
+    """
+    Create a new DataLoader with hemisphere rotation augmentation.
+    
+    Args:
+        original_loader: Original PyTorch Geometric DataLoader
+    
+    Returns:
+        New DataLoader with hemisphere rotation transform
+    """
+    # Apply transform to dataset
+    transform = Random3DRotation()
+    
+    # Create new dataset with transform
+    class TransformedDataset:
+        def __init__(self, original_dataset, transform):
+            self.dataset = original_dataset
+            self.transform = transform
+        
+        def __len__(self):
+            return len(self.dataset)
+        
+        def __getitem__(self, idx):
+            data = self.dataset[idx]
+            return self.transform(data)
+    
+    transformed_dataset = TransformedDataset(dataset, transform)
+    
+    return transformed_dataset
 
 def create_random_rotation_loader(original_loader):
     """
