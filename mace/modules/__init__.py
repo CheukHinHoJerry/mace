@@ -30,6 +30,7 @@ from .blocks import (
     MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock,
     MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock,
+    MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
     ScaleShiftBlock,
 )
 from .loss import (
@@ -61,10 +62,13 @@ from .models import (
     MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodySelfMagmomScaleShiftMACE,
     MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE,
     MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE,
-    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsFixingNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE
 )
+
 from .radial import BesselBasis, GaussianBasis, PolynomialCutoff, ZBLBasis
-from .symmetric_contraction import SymmetricContraction
+from .symmetric_contraction import SymmetricContraction, NonSOCSymmetricContraction
 from .utils import (
     compute_avg_num_neighbors,
     compute_fixed_charge_dipole,
@@ -93,6 +97,7 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock,
     "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock,
+    "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
 }
 
 scaling_classes: Dict[str, Callable] = {
@@ -141,6 +146,7 @@ __all__ = [
     "WeightedHuberEnergyForcesStressLoss",
     "UniversalLoss",
     "SymmetricContraction",
+    "NonSOCSymmetricContraction",
     "interaction_classes",
     "compute_mean_std_atomic_inter_energy",
     "compute_avg_num_neighbors",

@@ -21,6 +21,8 @@ from mace.modules.wrapper_ops import (
 )
 from mace.tools.compile import simplify_if_compile
 from mace.tools.scatter import scatter_sum
+from .symmetric_contraction import NonSOCSymmetricContraction
+
 
 from .irreps_tools import (
     linear_out_irreps,
@@ -303,6 +305,14 @@ class EquivariantProductBasisBlock(torch.nn.Module):
                 num_elements=num_elements,
                 cueq_config=cueq_config,
             )
+        elif contraction_cls == "NonSOCSymmetricContraction":
+            self.symmetric_contractions = NonSOCSymmetricContraction(
+                irreps_in=node_feats_irreps,
+                irreps_out=target_irreps,
+                correlation=correlation,
+                num_elements=num_elements,
+                cueq_config=cueq_config,
+            )
         else:
             raise ValueError("Contraction class not supported")
         # Update linear
@@ -344,6 +354,122 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         if self.use_sc and sc is not None:
             return self.linear(node_feats) + sc
         return self.linear(node_feats)
+
+
+@compile_mode("script")
+class EquivariantProductBasisNonSOCWithSelfMagmomBlock(torch.nn.Module):
+    def __init__(
+        self,
+        node_feats_irreps: o3.Irreps,
+        target_irreps: o3.Irreps,
+        magmom_node_inv_feats_irreps: o3.Irreps,
+        magmom_node_attrs_irreps: o3.Irreps,
+        correlation: int,
+        use_sc: bool = True,
+        num_elements: Optional[int] = None,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+        contraction_cls: Optional[str] = "SymmetricContraction"
+    ) -> None:
+        super().__init__()
+
+        self.use_sc = use_sc
+        self.magmom_node_inv_feats_irreps = magmom_node_inv_feats_irreps
+        self.magmom_node_attrs_irreps = magmom_node_attrs_irreps
+        self.cueq_config = cueq_config
+        self.contraction_cls = contraction_cls
+        
+        if contraction_cls == "SymmetricContraction":
+            self.symmetric_contractions = SymmetricContractionWrapper(
+                irreps_in=node_feats_irreps,
+                irreps_out=target_irreps,
+                correlation=correlation,
+                num_elements=num_elements,
+                cueq_config=cueq_config,
+            )
+        elif contraction_cls == "NonSOCSymmetricContraction":
+            self.symmetric_contractions = NonSOCSymmetricContraction(
+                irreps_in=node_feats_irreps,
+                irreps_out=target_irreps,
+                correlation=correlation,
+                num_elements=num_elements,
+                # cueq_config=cueq_config,
+            )
+        else:
+            raise ValueError("Contraction class not supported")
+        
+        weight_irreps = o3.Irreps(f"128x0e")
+        magmom_input_dim = self.magmom_node_inv_feats_irreps.num_irreps
+
+        # Build the TensorProduct between node features and those scalar weights
+        irreps_mid = target_irreps
+
+        self.conv_tp_weights = nn.FullyConnectedNet(
+            [magmom_input_dim] + [64, 64, 64] + [128],
+            torch.nn.functional.silu,
+        )
+        
+        self.conv_tp = FullyConnectedTensorProduct(
+            o3.Irreps(str(target_irreps)),
+            weight_irreps,
+            irreps_mid,
+            cueq_config=self.cueq_config,
+        )
+
+        
+        # Update linear
+        self.linear = Linear(
+            self.conv_tp.irreps_out,
+            o3.Irreps(str(target_irreps)),
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=cueq_config,
+        )
+        self.linear_ori = Linear(
+            o3.Irreps(str(target_irreps)),
+            o3.Irreps(str(target_irreps)),
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=cueq_config,
+        )
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        sc: Optional[torch.Tensor],
+        node_attrs: torch.Tensor,
+        magmom_node_inv_feats: torch.Tensor,
+        magmom_node_attrs: torch.Tensor,
+    ) -> torch.Tensor:
+        use_cueq = False
+        use_cueq_mul_ir = False
+        if hasattr(self, "cueq_config"):
+            if self.cueq_config is not None:
+                if self.cueq_config.enabled and (
+                    self.cueq_config.optimize_all or self.cueq_config.optimize_symmetric
+                ):
+                    use_cueq = True
+                if self.cueq_config.layout_str == "mul_ir":
+                    use_cueq_mul_ir = True
+        if use_cueq:
+            if use_cueq_mul_ir:
+                node_feats = torch.transpose(node_feats, 1, 2)
+            index_attrs = torch.nonzero(node_attrs)[:, 1].int()
+            node_feats = self.symmetric_contractions(
+                node_feats.flatten(1),
+                index_attrs,
+            )
+        else:
+            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+
+        # interaction with magnectic moment
+        tp_weights = self.conv_tp_weights(magmom_node_inv_feats)
+        
+        out = self.conv_tp(node_feats, tp_weights)
+
+        if self.use_sc and sc is not None:
+            out_message = self.linear(out) + self.linear_ori(node_feats) + sc
+        else:
+            out_message = self.linear(out) + self.linear_ori(node_feats)
+        return out_message
 
 
 @compile_mode("script")
@@ -1981,15 +2107,12 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
             internal_weights=False,
             cueq_config=self.cueq_config,
         )
-        self.reshape_mji = reshape_irreps(self.conv_tp.irreps_out)
-        self.inv_reshape_mji = inverse_reshape_irreps(self.conv_tp.irreps_out)
+        
+        self.reshape_mji = reshape_irreps(self.conv_tp.irreps_out, cueq_config=self.cueq_config)
+        #self.inv_reshape_mji = inverse_reshape_irreps(self.conv_tp.irreps_out, cueq_config=self.cueq_config)
 
         # TensorProduct in magnetic moment space
-        magmom_irreps_mid, magmom_instructions = tp_out_irreps_with_instructions(
-            self.node_feats_irreps,
-            self.magmom_node_attrs_irreps,
-            self.target_irreps,
-        )
+        magmom_irreps_mid, magmom_instructions = tp_out_irreps_with_instructions(self.node_feats_irreps,self.magmom_node_attrs_irreps,self.target_irreps,)
         self.magmom_conv_tp = TensorProduct(
             self.node_feats_irreps,
             self.magmom_node_attrs_irreps,
@@ -1999,8 +2122,8 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
             internal_weights=False,
             cueq_config=self.cueq_config,
         )
-        self.reshape_magmom_mji = reshape_irreps(self.magmom_conv_tp.irreps_out)
-        self.inv_reshape_magmom_mji = inverse_reshape_irreps(self.magmom_conv_tp.irreps_out)
+        #self.reshape_magmom_mji = reshape_irreps(self.magmom_conv_tp.irreps_out)
+        #self.inv_reshape_magmom_mji = inverse_reshape_irreps(self.magmom_conv_tp.irreps_out)
 
         # Convolution weights 
         # fix later
@@ -2050,7 +2173,7 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
 
         # Density normalization
         self.density_fn = nn.FullyConnectedNet(
-            [input_dim]
+            [input_dim + magmom_input_dim]
             + [
                 1,
             ],
@@ -2082,7 +2205,6 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
 
         # boardcast node feats to number of nodes
         magmom_inv_feats_j = magmom_node_inv_feats[sender]
-        
 
         edge_feats_with_magmom = torch.cat([edge_feats, magmom_inv_feats_j], dim=-1)        
 
@@ -2090,7 +2212,7 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
         tp_weights = self.conv_tp_weights(edge_feats_with_magmom)
 
         # density normalization
-        edge_density = torch.tanh(self.density_fn(edge_feats) ** 2)
+        edge_density = torch.tanh(self.density_fn(edge_feats_with_magmom) ** 2)
 
         pre_mji = self.conv_tp(
             node_feats[sender], edge_attrs, tp_weights
@@ -2099,18 +2221,21 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
         
         tp_weights_magmom = self.conv_tp_weights_magmom(edge_feats_with_magmom)
         tp_weights_magmom = tp_weights_magmom.reshape(num_edges, num_k, lmax_magmom+1)
+        # this is just CP decomposition
         tp_weights_magmom = tp_weights_magmom * pre_mji[:, :num_k].unsqueeze(-1)
-        tp_weights_magmom = tp_weights_magmom.reshape(num_edges, -1)
+        tp_weights_magmom = tp_weights_magmom.reshape(num_edges, tp_weights_magmom.shape[1] * tp_weights_magmom.shape[2])
 
         magmom_mji = self.magmom_conv_tp(
             node_feats[sender], magmom_node_attrs[sender], tp_weights_magmom
         )  # [n_edges, irreps]
         
         # 
-        tp_weights = tp_weights.reshape(num_edges, num_k, -1)
+        tp_weights = tp_weights.reshape(num_edges, num_k, tp_weights.shape[1] // num_k)
+        # same here
         tp_weights = tp_weights * magmom_mji[:, :num_k].unsqueeze(-1)
-        tp_weights = tp_weights.reshape(num_edges, -1)
+        tp_weights = tp_weights.reshape(num_edges, tp_weights.shape[1] * tp_weights.shape[2])
 
+        # import pdb; pdb.set_trace();
         mji = self.conv_tp(
             node_feats[sender], edge_attrs, tp_weights
         )  # [n_edges, irreps]
@@ -2145,9 +2270,9 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
         noSO_message = self.linear(noSO_message) / (density + 1)
         noSO_message = self.skip_tp(noSO_message, node_attrs)
         # not doing density normalization for now
-        noSO_magmom_message = self.magmom_linear(noSO_magmom_message) / self.avg_num_neighbors
+        noSO_magmom_message = self.magmom_linear(noSO_magmom_message) / (density + 1)
         noSO_magmom_message = self.magmom_skip_tp(noSO_magmom_message, node_attrs)
-
+        # import pdb; pdb.set_trace();
         return (
             self.reshape(noSO_message),
             None,
@@ -2156,6 +2281,236 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
             SO_message,
             None
         )  # [n_nodes, channels, (lmax + 1)**2]
+
+@compile_mode("script")
+class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInteractionBlock):
+    """
+    Non-SOC interaction block that constructs A_{k k' l l' m m'} = sum_j φ_{k l m}(r_j) φ'_{k' l' m'}(m_j)
+    via pointwise (k,k') contraction (CP decomposition).
+    """
+
+    def _setup(self) -> None:
+        if not hasattr(self, "cueq_config"):
+            self.cueq_config = None
+
+        # --- 1. Linear preprocessing on node features ---
+        self.linear_up = Linear(
+            self.node_feats_irreps,
+            self.node_feats_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+        )
+
+        # --- 2. TensorProduct for real-space (r) message ---
+        irreps_r_mid, instr_r = tp_out_irreps_with_instructions(
+            self.node_feats_irreps,
+            self.edge_attrs_irreps,
+            self.target_irreps,
+        )
+        self.conv_tp_r = TensorProduct(
+            self.node_feats_irreps,
+            self.edge_attrs_irreps,
+            irreps_r_mid,
+            instructions=instr_r,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+        )
+
+        # --- 3. TensorProduct for magnetic-space (m) message ---
+        irreps_m_mid, instr_m = tp_out_irreps_with_instructions(
+            self.node_feats_irreps,
+            self.magmom_node_attrs_irreps,
+            self.target_irreps,
+        )
+        self.conv_tp_m = TensorProduct(
+            self.node_feats_irreps,
+            self.magmom_node_attrs_irreps,
+            irreps_m_mid,
+            instructions=instr_m,
+            shared_weights=False,
+            internal_weights=False,
+            cueq_config=self.cueq_config,
+        )
+
+        # --- 4. MLPs generating radial/magnetic weights ---
+        input_dim = self.edge_feats_irreps.num_irreps
+        magmom_input_dim = self.magmom_node_inv_feats_irreps.num_irreps
+        self.conv_tp_r_weights = nn.FullyConnectedNet(
+            [input_dim + magmom_input_dim] + self.radial_MLP + [self.conv_tp_r.weight_numel],
+            torch.nn.functional.silu,
+        )
+        self.conv_tp_m_weights = nn.FullyConnectedNet(
+            [input_dim + magmom_input_dim] + self.radial_MLP + [self.conv_tp_m.weight_numel],
+            torch.nn.functional.silu,
+        )
+
+        self.reshape_tp_m_mji = reshape_irreps(self.conv_tp_m.irreps_out, cueq_config=self.cueq_config)
+        self.inv_reshape_tp_m_mji = inverse_reshape_irreps(self.conv_tp_m.irreps_out, cueq_config=self.cueq_config)
+
+        self.reshape_tp_r_mji = reshape_irreps(self.conv_tp_r.irreps_out, cueq_config=self.cueq_config)
+        self.inv_reshape_tp_r_mji = inverse_reshape_irreps(self.conv_tp_r.irreps_out, cueq_config=self.cueq_config)
+
+
+        # --- 5. Linear post-processing ---
+        self.irreps_out = self.target_irreps
+        self.linear_r = Linear(
+            irreps_r_mid, self.irreps_out,
+            internal_weights=True, shared_weights=True, cueq_config=self.cueq_config,
+        )
+        self.linear_m = Linear(
+            irreps_m_mid, self.irreps_out,
+            internal_weights=True, shared_weights=True, cueq_config=self.cueq_config,
+        )
+
+        # --- 6. Selector TensorProducts (skip connections) ---
+        # self.skip_tp_r = FullyConnectedTensorProduct(
+        #     self.irreps_out, self.node_attrs_irreps, self.irreps_out, cueq_config=self.cueq_config,
+        # )
+        # self.skip_tp_m = FullyConnectedTensorProduct(
+        #     self.irreps_out, self.node_attrs_irreps, self.irreps_out, cueq_config=self.cueq_config,
+        # )
+
+        # self.linear_lr_weight_list = torch.nn.ParameterList()
+        # for mul_r, ir_r in self.conv_tp_r.irreps_out:
+        #     W = torch.nn.Parameter(torch.randn(mul_r, mul_r) / np.sqrt(mul_r))
+        #     self.linear_lr_weight_list.append(W)
+
+        # self.linear_lm_weight_list = torch.nn.ParameterList()
+        # for mul_m, ir_m in self.conv_tp_m.irreps_out:
+        #     W = torch.nn.Parameter(torch.randn(mul_m, mul_m) / np.sqrt(mul_m))
+        #     self.linear_lm_weight_list.append(W)
+
+        # In _setup, define joint weights:
+        self.linear_block_weight_list = torch.nn.ParameterList()
+        for mul_r, ir_r in self.conv_tp_r.irreps_out:
+            block_weights = []
+            for mul_m, ir_m in self.conv_tp_m.irreps_out:
+                # Joint weight for this (l, l') block
+                # Operates on the shared k dimension
+                # Assuming k is the same for both r and m (from the einsum 'bkl,bkp->bklp')
+                k_size = mul_r  # or determine from architecture
+                W = torch.nn.Parameter(torch.randn(k_size, k_size) / np.sqrt(k_size))
+                block_weights.append(W)
+            self.linear_block_weight_list.append(torch.nn.ParameterList(block_weights))
+
+
+
+        # --- 7. Density normalization ---
+        self.density_fn = nn.FullyConnectedNet(
+            [input_dim + magmom_input_dim] + [1],
+            torch.nn.functional.silu,
+        )
+
+        # --- 8. Reshape utility ---
+        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        # self.inv_reshape = inverse_reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+
+    # =========================================================
+    # Forward pass
+    # =========================================================
+    def forward(
+        self,
+        node_attrs: torch.Tensor,
+        node_feats: torch.Tensor,
+        edge_attrs: torch.Tensor,
+        edge_feats: torch.Tensor,
+        edge_index: torch.Tensor,
+        magmom_node_inv_feats: torch.Tensor,
+        magmom_node_attrs: torch.Tensor,
+        couple_SO: Optional[bool] = False,
+    ) -> Tuple[torch.Tensor, None]:
+
+        sender, receiver = edge_index
+        num_edges = len(sender)
+        num_nodes = node_feats.shape[0]
+
+        # --- preprocess node features ---
+        node_feats = self.linear_up(node_feats)
+        magmom_inv_feats_j = magmom_node_inv_feats[sender]
+
+        # --- combine edge + magnetic invariants for radial weights ---
+        edge_feats_with_magmom = torch.cat([edge_feats, magmom_inv_feats_j], dim=-1)
+
+        # --- compute TP weights ---
+        tp_r_weights = self.conv_tp_r_weights(edge_feats_with_magmom)
+        tp_m_weights = self.conv_tp_m_weights(edge_feats_with_magmom)
+
+        # --- density normalization term ---
+        edge_density = torch.tanh(self.density_fn(edge_feats_with_magmom) ** 2)
+
+        # --- compute positional and magnetic edge messages ---
+        r_msg = self.conv_tp_r(node_feats[sender], edge_attrs, tp_r_weights)  # φ_{klm}(r_j)
+        m_msg = self.conv_tp_m(node_feats[sender], magmom_node_attrs[sender], tp_m_weights)  # φ'_{k'l'm'}(m_j)
+        
+        # import pdb; pdb.set_trace();
+        r_msg = self.reshape_tp_r_mji(r_msg)
+        m_msg = self.reshape_tp_m_mji(m_msg)
+        # import pdb; pdb.set_trace();
+        # --- CP-type contraction: pointwise product over (k,k') ---
+        # both r_msg and m_msg: [n_edges, irreps_dim] (same per-edge shape)
+        A_msg = torch.einsum('bkl,bkp->bklp', r_msg, m_msg)  # elementwise CP product = A_{kk'll'mm'}(edge)
+
+        # --- aggregate to nodes (sum over j) ---
+        pooled_A = scatter_sum(src=A_msg, index=receiver, dim=0, dim_size=num_nodes)
+
+        # --- normalize by density ---
+        density = scatter_sum(src=edge_density, index=receiver, dim=0, dim_size=num_nodes)
+        density = density + 1.0
+
+        # --- linear and skip connections ---
+        # Loop over irreps blocks
+        # Create a new buffer to store the output (same shape)
+         # In forward, apply block-wise transformations:
+        pooled_A_transformed = torch.zeros_like(pooled_A)
+
+        r_dim_offsets = np.cumsum([0] + [mul * ir.dim for mul, ir in self.conv_tp_r.irreps_out])
+        m_dim_offsets = np.cumsum([0] + [mul * ir.dim for mul, ir in self.conv_tp_m.irreps_out])
+
+        for i_l, (mul_r, ir_r) in enumerate(self.conv_tp_r.irreps_out):
+            dim_r_start, dim_r_end = r_dim_offsets[i_l], r_dim_offsets[i_l + 1]
+            
+            for j_l, (mul_m, ir_m) in enumerate(self.conv_tp_m.irreps_out):
+                dim_m_start, dim_m_end = m_dim_offsets[j_l], m_dim_offsets[j_l + 1]
+                
+                # Get block-specific weight
+                W_block = self.linear_block_weight_list[i_l][j_l]  # [k, k']
+                
+                # Extract (l, l') block from pooled_A
+                A_block = pooled_A[:, :, dim_r_start:dim_r_end, dim_m_start:dim_m_end]
+                # Shape: [batch, k, dim_r, dim_m]
+                
+                # Apply transformation on k dimension
+                A_transformed = torch.einsum('bkdq,km->bmdq', A_block, W_block)
+                
+                # Store in output
+                pooled_A_transformed[:, :, dim_r_start:dim_r_end, dim_m_start:dim_m_end] = A_transformed
+
+        # Use pooled_A_transformed for subsequent operations
+        # out_A = pooled_A_transformed
+
+        # Now replace pooled_A
+        pooled_A = pooled_A_transformed / density.unsqueeze(-1).unsqueeze(-1)
+
+        # introduce skip_connection, skip for now
+        # out_A = self.skip_tp_r(self.linear_r(pooled_A) / density, node_attrs)
+
+        if couple_SO:
+            raise ValueError("SOC coupling not implemented in this non-SOC block.")
+        else:
+            SO_message = None
+
+        # --- output ---
+        return (
+            pooled_A,  # combined positional–magnetic message (A_{kk'll'mm'})
+            None,
+            None,  # pure magnetic message
+            None,
+            SO_message,
+            None,
+        )
+
 
 
 @compile_mode("script")

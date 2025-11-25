@@ -136,6 +136,8 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE",
             "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE",
             "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsFixingNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -194,6 +196,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -217,6 +220,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -885,7 +889,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         ],
     )
 
-    # --- magnetic ace ---
+    # --- magnetic mace ---
     parser.add_argument(
         "--num_mag_radial_basis_one_body",
         help="number of radial basis for one body contribution in magnetic mace",

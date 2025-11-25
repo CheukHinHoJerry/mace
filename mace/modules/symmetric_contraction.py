@@ -13,11 +13,180 @@ import torch.fx
 from e3nn import o3
 from e3nn.util.codegen import CodeGenMixin
 from e3nn.util.jit import compile_mode
+from opt_einsum import contract
 
 from mace.tools.cg import U_matrix_real
 
 BATCH_EXAMPLE = 10
-ALPHABET = ["w", "x", "v", "n", "z", "r", "t", "y", "u", "o", "p", "s"]
+ALPHABET = ["w", "x", "v", "n", "z", "r", "t"]
+ALPHABET_MAGMOM = ["y", "u", "o", "p", "s"] # ["w", "x", "v", "n", "z", "r", "t", "y", "u", "o", "p", "s"]
+
+
+@compile_mode("script")
+class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        irreps_out: o3.Irreps,
+        correlation: Union[int, Dict[str, int]],
+        irrep_normalization: str = "component",
+        path_normalization: str = "element",
+        internal_weights: Optional[bool] = None,
+        shared_weights: Optional[bool] = None,
+        num_elements: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+
+        if irrep_normalization is None:
+            irrep_normalization = "component"
+
+        if path_normalization is None:
+            path_normalization = "element"
+
+        assert irrep_normalization in ["component", "norm", "none"]
+        assert path_normalization in ["element", "path", "none"]
+
+        self.irreps_in = o3.Irreps(irreps_in)
+        self.irreps_out = o3.Irreps(irreps_out)
+
+        del irreps_in, irreps_out
+
+        if not isinstance(correlation, tuple):
+            corr = correlation
+            correlation = {}
+            for irrep_out in self.irreps_out:
+                correlation[irrep_out] = corr
+
+        assert shared_weights or not internal_weights
+
+        if internal_weights is None:
+            internal_weights = True
+
+        self.internal_weights = internal_weights
+        self.shared_weights = shared_weights
+
+        del internal_weights, shared_weights
+
+        self.contractions = torch.nn.ModuleList()
+        # import pdb; pdb.set_trace();
+        for irrep_out in self.irreps_out:
+            self.contractions.append(
+                NonSOCContraction(
+                    irreps_in=self.irreps_in,
+                    irrep_out=o3.Irreps(str(irrep_out.ir)),
+                    correlation=correlation[irrep_out],
+                    internal_weights=self.internal_weights,
+                    num_elements=num_elements,
+                    weights=self.shared_weights,
+                )
+            )
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
+        outs = [contraction(x, y) for contraction in self.contractions]
+        return torch.cat(outs, dim=-1)
+    
+@compile_mode("script")
+class NonSOCContraction(torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        irrep_out: o3.Irreps,
+        correlation: int,
+        internal_weights: bool = True,
+        num_elements: Optional[int] = None,
+        weights: Optional[torch.Tensor] = None,
+    ) -> None:
+        super().__init__()
+
+        self.num_features = irreps_in.count((0, 1))
+        self.coupling_irreps = o3.Irreps([irrep.ir for irrep in irreps_in])
+        self.correlation = correlation
+        self.irrep_out = irrep_out
+        
+        dtype = torch.get_default_dtype()
+        for nu in range(1, correlation + 1):
+            U_matrix = U_matrix_real(
+                irreps_in=self.coupling_irreps,
+                irreps_out=irrep_out,
+                correlation=nu,
+                dtype=dtype,
+            )[-1]
+            self.register_buffer(f"U_matrix_{nu}", U_matrix)
+
+        # assume the input is always m_ell = 1
+        for nu in range(1, correlation + 1):
+            U_matrix = U_matrix_real(
+                irreps_in=o3.Irreps('1x0e+1x1o'), #self.coupling_irreps,
+                irreps_out=irrep_out,
+                correlation=nu,
+                dtype=dtype,
+            )[-1]
+            self.register_buffer(f"U_matrix_magmom_{nu}", U_matrix)
+
+        # Tensor contraction equations
+        self.contractions_weighting = torch.nn.ModuleList()
+        self.contractions_features = torch.nn.ModuleList()
+
+        # Create weight for product basis
+        self.weights = torch.nn.ParameterList([])
+
+        for i in range(correlation, 0, -1):
+            # Shapes definying
+            num_params = self.U_tensors(i).size()[-1]
+            num_params_magmom = self.U_magmom_tensors(i).size()[-1]
+            num_equivariance = 2 * irrep_out.lmax + 1
+            num_ell = self.U_tensors(i).size()[-2]
+
+            if i == correlation:
+                # Parameters for the product basis
+                w = torch.nn.Parameter(
+                    torch.randn((num_elements, num_params, num_params_magmom, self.num_features))
+                    / (num_params * num_params_magmom)
+                )
+                self.weights_max = w
+            else:
+                # Parameters for the product basis
+                w = torch.nn.Parameter(
+                    torch.randn((num_elements, num_params, num_params_magmom, self.num_features))
+                    / (num_params * num_params_magmom)
+                )
+                self.weights.append(w)
+        if not internal_weights:
+            self.weights = weights[:-1]
+            self.weights_max = weights[-1]
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor):
+        # x is of shape A_{i, k, lm, l'm'}
+        # 'cg_r, cg_m, A_{k, lm, l',m}
+
+        assert self.irrep_out.lmax == 0
+        bs = x.shape[0]
+        outs_dict = dict()
+
+        parse_instruction_1 = ([ALPHABET[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)]+ ["ik,"] + [ALPHABET_MAGMOM[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)]+ ["lq,"]+ ["ekqa,bail,be->ba"] + [ALPHABET[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)] + [ALPHABET_MAGMOM[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)])
+
+        parse_instruction_2 = ([ALPHABET[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)] + ["ijk,"] + [ALPHABET_MAGMOM[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)] + ["lmq,"] + ["ekqa,bail,bajm,be->ba"] + [ALPHABET[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)] + [ALPHABET_MAGMOM[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)])
+        parse_instruction_3 = ([ALPHABET[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)] + ["ijfk,"] + [ALPHABET_MAGMOM[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)] + ["lmgq,"] + ["ekqa,bail,bajm,bafg,be->ba"] + [ALPHABET[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)] + [ALPHABET_MAGMOM[j] for j in range(1 + min(self.irrep_out.lmax, 1) - 1)])
+        parse_instruction_list = ["".join(parse_instruction_1), "".join(parse_instruction_2), "".join(parse_instruction_3)]
+        
+        for nu in range(1, self.correlation+1):
+            if nu == 1:
+                outs_dict[nu] = contract(parse_instruction_list[nu-1], self.U_tensors(nu), self.U_magmom_tensors(nu), self.weights[nu-1], x, y)
+            elif nu == 2:
+                outs_dict[nu] = contract(parse_instruction_list[nu-1], self.U_tensors(nu), self.U_magmom_tensors(nu), self.weights[nu-1], x, x, y)
+            elif nu == 3:
+                outs_dict[nu] = contract(parse_instruction_list[nu-1], self.U_tensors(nu), self.U_magmom_tensors(nu), self.weights_max, x, x, x, y)
+        
+        out = outs_dict[self.correlation]
+        for nu in range(self.correlation - 1, 0, -1):
+            out += outs_dict[nu]
+        return out.view(out.shape[0], -1)
+
+    def U_tensors(self, nu: int):
+        return dict(self.named_buffers())[f"U_matrix_{nu}"]
+    
+    def U_magmom_tensors(self, nu: int):
+        return dict(self.named_buffers())[f"U_matrix_magmom_{nu}"]
 
 
 @compile_mode("script")

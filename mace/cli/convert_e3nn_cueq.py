@@ -29,6 +29,7 @@ def get_transfer_keys(num_layers: int) -> List[str]:
             f"interactions.{j}.linear.weight",
             f"interactions.{j}.skip_tp.weight",
             f"products.{j}.linear.weight",
+            f"magmom_products.{j}.linear.weight",
         ]
     ] + [
         s
@@ -37,6 +38,7 @@ def get_transfer_keys(num_layers: int) -> List[str]:
                 f"interactions.{j}.magmom_linear.weight",
                 f"interactions.{j}.magmom_skip_tp.weight",
                 f"products.{j}.linear_ori.weight",
+                f"magmom_products.{j}.linear_ori.weight",
             ]
     ]
 
@@ -106,11 +108,17 @@ def transfer_weights(
         if any(x in key for x in ["linear", "skip_tp"]) and "weight" in key:
             target_dict[key] = target_dict[key].unsqueeze(0)
 
+
     transferred_keys = set(transfer_keys)
     remaining_keys = (
         set(source_dict.keys()) & set(target_dict.keys()) - transferred_keys
     )
     remaining_keys = {k for k in remaining_keys if "symmetric_contraction" not in k}
+
+    for key in remaining_keys:
+        if key == "magmom_products.0.conv_tp.weight" or key == "products.0.conv_tp.weight":
+            target_dict[key] = target_dict[key]# .unsqueeze(0)
+
     if remaining_keys:
         for key in remaining_keys:
             if source_dict[key].shape == target_dict[key].shape:

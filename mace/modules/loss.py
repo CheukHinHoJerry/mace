@@ -354,6 +354,9 @@ class WeightedHuberEnergyForcesStressLoss(torch.nn.Module):
             loss_stress = torch.nn.functional.huber_loss(
                 ref["stress"], pred["stress"], reduction="mean", delta=self.huber_delta
             )
+        print(loss_energy)
+        print(loss_forces)
+        print(loss_stress)
         return (
             self.energy_weight * loss_energy
             + self.forces_weight * loss_forces
@@ -453,6 +456,7 @@ class UniversalLoss(torch.nn.Module):
                     reduction="mean",
                     delta=self.huber_delta,
                 )
+                print("loss_magforces: ", loss_magforces)
             else:
                 loss_magforces = 0
         return (

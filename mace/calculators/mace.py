@@ -301,6 +301,7 @@ class MACECalculator(Calculator):
         ret_tensors = self._create_result_tensors(
             self.model_type, self.num_models, len(atoms)
         )
+
         for i, model in enumerate(self.models):
             batch = self._clone_batch(batch_base)
             out = model(
@@ -607,7 +608,6 @@ class MagneticMACECalculator(Calculator):
             self.heads = self.models[0].magmom_mace.heads
         except AttributeError:
             self.heads = ["Default"]
-        print(f"inside cal, {self.heads}")
         model_dtype = get_model_dtype(self.models[0])
         if default_dtype == "":
             print(
@@ -706,12 +706,18 @@ class MagneticMACECalculator(Calculator):
         ret_tensors = self._create_result_tensors(
             self.model_type, self.num_models, len(atoms)
         )
+
+        if "applied_B_field" in atoms.arrays.keys():
+            applied_B_field = torch.tensor(atoms.arrays['applied_B_field']).to(self.device)
+        else:
+            applied_B_field = None
         for i, model in enumerate(self.models):
             batch = self._clone_batch(batch_base)
             out = model(
                 batch.to_dict(),
                 compute_stress=compute_stress,
                 training=self.use_compile,
+                applied_B_field=applied_B_field,
             )
             if self.model_type in ["MACE", "EnergyDipoleMACE"]:
                 ret_tensors["energies"][i] = out["energy"].detach()
@@ -724,6 +730,17 @@ class MagneticMACECalculator(Calculator):
             if "equilibrated_magmom" in out.keys():
                 assert len(self.models) == 1, "magnetic mace committee not supported"
                 ret_tensors["dft_magmom"] = out["equilibrated_magmom"].detach()
+            if "magmom_history" in out.keys():
+                ret_tensors["magmom_history"] = out["magmom_history"].detach()
+            if "grad_norm_history" in out.keys():
+                ret_tensors["grad_norm_history"] = out["grad_norm_history"].detach()
+            if "one_body_magmom_energy" in out.keys():
+                ret_tensors["one_body_magmom_energy"] = out["one_body_magmom_energy"] # .detach()
+            if "scf_steps" in out.keys():
+                ret_tensors["scf_steps"] = out["scf_steps"] # .detach()
+            
+            
+                
 
         self.results = {}
         if self.model_type in ["MACE", "EnergyDipoleMACE"]:
@@ -740,11 +757,21 @@ class MagneticMACECalculator(Calculator):
                 * self.energy_units_to_eV
                 / self.length_units_to_A
             )
-            if "dft_magmom" in ret_tensors.keys():
-                #self.results['dft_magmom'] = torch.mean(ret_tensors["dft_magmom"], dim=0).cpu().numpy()
-                self.results['dft_magmom'] = ret_tensors["dft_magmom"].cpu().numpy()
             
+            if "dft_magmom" in ret_tensors.keys():
+                self.results['dft_magmom'] = ret_tensors["dft_magmom"].cpu().numpy()
+
+            if "magmom_history" in ret_tensors.keys():
+                self.results['magmom_history'] = ret_tensors["magmom_history"].cpu().numpy()
+
+            if "grad_norm_history" in ret_tensors.keys():
+                self.results['grad_norm_history'] = ret_tensors["grad_norm_history"].cpu().numpy()
+
+            if "one_body_magmom_energy" in ret_tensors.keys():
+                self.results['one_body_magmom_energy'] = ret_tensors["one_body_magmom_energy"].cpu().detach().numpy()
+
             if self.num_models > 1:
+                assert 1 == 0
                 self.results["energies"] = (
                     ret_tensors["energies"].cpu().numpy() * self.energy_units_to_eV
                 )
@@ -785,6 +812,15 @@ class MagneticMACECalculator(Calculator):
                 )
         # modify this inpalce
         atoms.arrays['dft_magmom'] = self.results["dft_magmom"]
+
+        if 'magmom_history' in self.results:
+            atoms.arrays['magmom_history'] = self.results["magmom_history"]
+
+        if 'grad_norm_history' in self.results:
+            atoms.info['grad_norm_history'] = self.results["grad_norm_history"]
+
+        if 'scf_steps' in ret_tensors:
+            atoms.info['scf_steps'] = ret_tensors["scf_steps"]
 
     def get_hessian(self, atoms=None):
         if atoms is None and self.atoms is None:
