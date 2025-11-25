@@ -352,8 +352,12 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         max_m_ell = None
 
     ##
-    print("mlp_irreps: ", mlp_irreps)
-    
+    radial_MLP = None
+    if hasattr(model.interactions[0], "conv_tp_weights"):
+        radial_MLP = model.interactions[0].conv_tp_weights.hs[1:-1]
+    else:
+        radial_MLP = model.interactions[0].conv_tp_m_weights.hs[1:-1]
+
     config = {
         "r_max": model.r_max.item(),
         "num_bessel": len(model.radial_embedding.bessel_fn.bessel_weights),
@@ -379,7 +383,7 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "radial_type": radial_to_name(
             model.radial_embedding.bessel_fn.__class__.__name__
         ),
-        "radial_MLP": model.interactions[0].conv_tp_weights.hs[1:-1],
+        "radial_MLP": radial_MLP, #model.interactions[0].conv_tp_weights.hs[1:-1] if 
         "pair_repulsion": hasattr(model, "pair_repulsion_fn"),
         "distance_transform": radial_to_transform(model.radial_embedding),
         "atomic_inter_scale": scale.cpu().numpy(),
@@ -389,10 +393,11 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "m_max": m_max,
         "num_mag_radial_basis": num_mag_radial_basis,
         "max_m_ell": max_m_ell,
-        "num_mag_radial_basis_one_body": int(model.onebody_magmombasis_coeffs.shape[1]),
         "contraction_cls": "SymmetricContraction",
         "contraction_cls_first": "SymmetricContraction",
     }
+    if hasattr(model, "onebody_magmombasis_coeffs"):
+        config["num_mag_radial_basis_one_body"] = int(model.onebody_magmombasis_coeffs.shape[1])
     return config
 
 
