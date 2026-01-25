@@ -42,6 +42,7 @@ from .loss import (
     WeightedEnergyForcesVirialsLoss,
     WeightedForcesLoss,
     WeightedHuberEnergyForcesStressLoss,
+    EvenSpline1BodyLoss,
 )
 from .models import (
     MACE,
@@ -64,7 +65,12 @@ from .models import (
     MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE,
     MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
     MagneticSolidHarmonicsNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
-    MagneticSolidHarmonicsFixingNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE
+    MagneticSolidHarmonicsFixingNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesFixingGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomFixingScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesEvenSplineSelfMagmomScaleShiftMACE,
+    #
+    EvenMagSaturationBarrier
 )
 
 from .radial import BesselBasis, GaussianBasis, PolynomialCutoff, ZBLBasis
@@ -145,6 +151,7 @@ __all__ = [
     "WeightedEnergyForcesDipoleLoss",
     "WeightedHuberEnergyForcesStressLoss",
     "UniversalLoss",
+    "EvenSpline1BodyLoss",
     "SymmetricContraction",
     "NonSOCSymmetricContraction",
     "interaction_classes",

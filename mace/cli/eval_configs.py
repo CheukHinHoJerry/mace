@@ -13,7 +13,7 @@ import torch
 
 from mace import data
 from mace.tools import torch_geometric, torch_tools, utils
-
+from tqdm import tqdm
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -128,7 +128,7 @@ def run(args: argparse.Namespace) -> None:
     forces_collection = []
     magforces_collection = []
 
-    for batch in data_loader:
+    for batch in tqdm(data_loader):
         batch = batch.to(device)
         output = model(batch.to_dict(), compute_stress=args.compute_stress)
         energies_list.append(torch_tools.to_numpy(output["energy"]))

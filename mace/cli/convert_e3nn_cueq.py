@@ -48,8 +48,10 @@ def get_kmax_pairs(
 ) -> List[Tuple[int, int]]:
     """Determine kmax pairs based on max_L and correlation"""
     if correlation == 2:
-        raise NotImplementedError("Correlation 2 not supported yet")
-    if correlation == 3:
+        raise NotImplementedError("Correlation 2 not supported yet")    
+    if num_layers == 1:
+        return [[i, max_L] for i in range(num_layers)]
+    elif correlation == 3:
         kmax_pairs = [[i, max_L] for i in range(num_layers - 1)]
         kmax_pairs = kmax_pairs + [[num_layers - 1, 0]]
         return kmax_pairs

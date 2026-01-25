@@ -42,8 +42,6 @@ def compute_mag_forces(
     energy: torch.Tensor, magmoms: torch.Tensor, training: bool = True
 ) -> torch.Tensor:
     grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
-    #print("energy grad_fn:", energy.grad_fn)
-    #print("magmoms shape: ", magmoms.shape)
     gradient = torch.autograd.grad(
         outputs=[energy],  # [n_graphs, ]
         inputs=[magmoms],  # [n_nodes, 3]

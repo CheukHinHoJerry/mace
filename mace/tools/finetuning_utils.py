@@ -286,8 +286,8 @@ def load_foundations_elements_default(
     new_z_table = table
     num_species_foundations = len(z_table.zs)
 
-    #if z_table.zs == table.zs:
-    #    return model_foundations
+    if z_table.zs == table.zs:
+       return model_foundations
 
     num_channels_foundation = (
         model_foundations.node_embedding.linear.weight.shape[0]

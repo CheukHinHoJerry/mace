@@ -319,8 +319,10 @@ class Random3DRotation(BaseTransform):
             ], device=device, dtype=dtype)
 
             # === Step 3: Apply to magmom (shape [N, 3])
+            # import pdb; pdb.set_trace();
             data.magmom = torch.matmul(data.magmom, R.T)
-
+            if data.magforces is not None:
+                data.magforces = torch.matmul(data.magforces, R.T)
         return data
 
 def create_random_rotation_dataset(dataset):
