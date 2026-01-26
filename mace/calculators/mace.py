@@ -738,9 +738,9 @@ class MagneticMACECalculator(Calculator):
                 ret_tensors["one_body_magmom_energy"] = out["one_body_magmom_energy"] # .detach()
             if "scf_steps" in out.keys():
                 ret_tensors["scf_steps"] = out["scf_steps"] # .detach()
+            if "scf_energy_history" in out.keys():
+                ret_tensors["scf_energy_history"] = out["scf_energy_history"] # .detach()
             
-            
-                
 
         self.results = {}
         if self.model_type in ["MACE", "EnergyDipoleMACE"]:
@@ -758,6 +758,9 @@ class MagneticMACECalculator(Calculator):
                 / self.length_units_to_A
             )
             
+            if "scf_energy_history" in ret_tensors.keys():
+                self.results['scf_energy_history'] = ret_tensors["scf_energy_history"].cpu().numpy()
+
             if "dft_magmom" in ret_tensors.keys():
                 self.results['dft_magmom'] = ret_tensors["dft_magmom"].cpu().numpy()
 
@@ -813,8 +816,11 @@ class MagneticMACECalculator(Calculator):
         # modify this inpalce
         atoms.arrays['dft_magmom'] = self.results["dft_magmom"]
 
+        if 'scf_energy_history' in self.results:
+            atoms.info['scf_energy_history'] = self.results["scf_energy_history"]
+
         if 'magmom_history' in self.results:
-            atoms.arrays['magmom_history'] = self.results["magmom_history"]
+            atoms.info['magmom_history'] = self.results["magmom_history"]
 
         if 'grad_norm_history' in self.results:
             atoms.info['grad_norm_history'] = self.results["grad_norm_history"]
