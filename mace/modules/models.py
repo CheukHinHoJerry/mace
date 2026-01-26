@@ -654,7 +654,7 @@ class MagneticMACE(torch.nn.Module):
                 if "OneBody" not in self.__class__.__name__:
                     prod_block_cls = EquivariantProductBasisWithSelfMagmomBlock
                 else:
-                    if "Readout" in self.__class__.__name__ or "Ginzburg" in self.__class__.__name__:
+                    if "Readout" in self.__class__.__name__ or "Ginzburg" in self.__class__.__name__ or "EvenSpline" in self.__class__.__name__:
                         prod_block_cls = EquivariantProductBasisWithSelfMagmomBlock
                     else:
                         prod_block_cls = EquivariantProductBasisWithOneBodySelfMagmomBlock
@@ -1589,6 +1589,191 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
         }
         return output
 
+
+
+@compile_mode("script")
+class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomFixingScaleShiftMACE(MagneticMACE):
+    def __init__(
+        self,
+        atomic_inter_scale: float,
+        atomic_inter_shift: float,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.scale_shift = ScaleShiftBlock(
+            scale=atomic_inter_scale, shift=0.0
+        )
+
+        # modify spherical to solid harmonics for magnetic moment
+        self.mag_solid_harmoics = SHModule(self.mag_spherical_harmonics._lmax)
+
+        self.mag_spherical_harmonics = None
+        self.magmom_readouts = None
+        self.magmom_products = None
+        #self.products = new_products
+
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+        compute_hessian: bool = False,
+        compute_magforces: bool = True,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        # Setup
+        data["positions"].requires_grad_(True)
+        data["node_attrs"].requires_grad_(True)
+        data["magmom"].requires_grad_(True)
+        
+        num_graphs = data["ptr"].numel() - 1
+        num_atoms_arange = torch.arange(data["positions"].shape[0])
+        node_heads = (
+            data["head"][data["batch"]]
+            if "head" in data
+            else torch.zeros_like(data["batch"])
+        )
+        displacement = torch.zeros(
+            (num_graphs, 3, 3),
+            dtype=data["positions"].dtype,
+            device=data["positions"].device,
+        )
+        if compute_virials or compute_stress or compute_displacement:
+            (
+                data["positions"],
+                data["shifts"],
+                displacement,
+            ) = get_symmetric_displacement(
+                positions=data["positions"],
+                unit_shifts=data["unit_shifts"],
+                cell=data["cell"],
+                edge_index=data["edge_index"],
+                num_graphs=num_graphs,
+                batch=data["batch"],
+            )
+
+        # Atomic energies
+        node_e0 = self.atomic_energies_fn(data["node_attrs"])[
+            num_atoms_arange, node_heads
+        ]
+        e0 = scatter_sum(
+            src=node_e0, index=data["batch"], dim=0, dim_size=num_graphs
+        )  # [n_graphs, num_heads]
+
+        # node embedding on species
+        node_feats = self.node_embedding(data["node_attrs"])
+
+        # prepare the Rnl and Ylm
+        vectors, lengths = get_edge_vectors_and_lengths(
+            positions=data["positions"],
+            edge_index=data["edge_index"],
+            shifts=data["shifts"],
+        )
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats = self.radial_embedding(
+            lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+        )
+        if hasattr(self, "pair_repulsion"):
+            pair_node_energy = self.pair_repulsion_fn(
+                lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+            )
+        else:
+            pair_node_energy = torch.zeros_like(node_e0)
+
+        # --- magnetic stuffs ---
+        
+        magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
+        element_dependent_scaling = self.m_max[torch.argmax(data["node_attrs"], dim=1)].unsqueeze(-1)
+        element_dependent_scaling.requires_grad_(True)
+        element_dependent_scaling.retain_grad()
+        
+        magmom_lenghts_trans = 1 - 2 * (magmom_lenghts / element_dependent_scaling)
+        # magmom_vectors = data["magmom"] / (magmom_lenghts + 1e-9)
+        
+        # Compute the spherical harmonics from the normalized vectors
+        magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
+
+        #
+        magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
+        
+        # Interactions
+        node_es_list = [pair_node_energy]
+        node_feats_list = []
+        
+
+        # one_body_magmom_energy = onebody_magmom_contri[num_atoms_arange, node_heads]
+
+        for interaction, product, readout in zip(
+            self.interactions, self.products, self.readouts
+        ):
+            node_feats, sc = interaction(
+                node_attrs=data["node_attrs"],
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data["edge_index"],
+                magmom_node_inv_feats=magmom_node_feats,
+                magmom_node_attrs=magmom_node_attrs
+            )
+          
+            node_feats = product(
+                node_feats=node_feats, sc=sc,node_attrs=data["node_attrs"], 
+                magmom_node_inv_feats=magmom_node_feats,
+                magmom_node_attrs=magmom_node_attrs
+            )
+            
+            node_feats_list.append(node_feats)
+            node_es_list.append(
+                readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+            )  # {[n_nodes, ], }
+
+
+        # Concatenate node features
+        node_feats_out = torch.cat(node_feats_list, dim=-1) 
+
+        # Sum over interactions
+        node_inter_es = torch.sum(
+            torch.stack(node_es_list, dim=0), dim=0
+        )  # [n_nodes, ]
+        node_inter_es = self.scale_shift(node_inter_es, node_heads)
+
+        # Sum over nodes in graph
+        inter_e = scatter_sum(
+            src=node_inter_es, index=data["batch"], dim=-1, dim_size=num_graphs
+        )  # [n_graphs,]
+        
+        # Add E_0 and (scaled) interaction energy
+        total_energy = e0 + inter_e
+        node_energy = node_e0 + node_inter_es
+        forces, virials, stress, hessian, magforces = get_outputs(
+            energy=inter_e,
+            positions=data["positions"],
+            displacement=displacement,
+            cell=data["cell"],
+            magmoms=data["magmom"],
+            training=training,
+            compute_force=compute_force,
+            compute_virials=compute_virials,
+            compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
+            compute_magforces=compute_magforces,
+        )
+        output = {
+            "energy": total_energy,
+            "node_energy": node_energy,
+            "interaction_energy": inter_e,
+            "forces": forces,
+            "magforces": magforces,
+            "virials": virials,
+            "stress": stress,
+            "hessian": hessian,
+            "displacement": displacement,
+            "node_feats": node_feats_out,
+        }
+        return output
+
 @compile_mode("script")
 class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodySelfMagmomScaleShiftMACE(MagneticMACE):
     def __init__(
@@ -2297,6 +2482,587 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfM
         # one body contribution radials, this is with constant shift so that it can be fitted
         magmom_one_body_radials = self.one_body_cheb_basis_with_const(
             magmom_lenghts_trans
+        )
+        
+        # Interactions
+        node_es_list = [pair_node_energy]
+        node_feats_list = []
+        magmom_node_feats_list = []
+        for (idx, (interaction, product, readout)) in enumerate(zip(
+            self.interactions, self.products, self.readouts
+        )):
+            node_feats, sc = interaction(
+                node_attrs=data["node_attrs"],
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data["edge_index"],
+                magmom_node_inv_feats=magmom_node_feats,
+                magmom_node_attrs=magmom_node_attrs
+            )
+          
+            node_feats = product(
+                node_feats=node_feats, sc=sc,node_attrs=data["node_attrs"], 
+                magmom_node_inv_feats=magmom_node_feats,
+                magmom_node_attrs=magmom_node_attrs,
+            )
+            
+            node_feats_list.append(node_feats)
+            if idx == (len(self.readouts) - 1):    
+                # linear (natom, num_basis) -> (natom, 1)
+                # remove certain constant to make it matches with E0, 
+                # self.one_body_magmom_const_correction is computed outside after pre-training
+                # Select the correct coefficient row for each atom via einsum
+                selected_coeffs = torch.einsum(
+                    "ns,sbh->nbh", data["node_attrs"], self.onebody_magmombasis_coeffs
+                )
+                #
+                one_body_correction = torch.einsum(
+                    'ns,sh->nh', data["node_attrs"], self.one_body_magmom_const_correction
+                )
+                # Compute dot product over nbasis → (n_nodes, num_heads)
+                onebody_magmom_contri = (magmom_one_body_radials.unsqueeze(-1) * selected_coeffs).sum(dim=1)
+
+                # apply correction so that the zero matches E0 exactly
+                onebody_magmom_contri -= one_body_correction
+
+                # Gather energy per atom + one-body magmom contribution for each head
+                node_es_list.append(
+                    readout(node_feats, node_heads)[num_atoms_arange, node_heads] +
+                    onebody_magmom_contri[num_atoms_arange, node_heads]
+                )
+            else:
+                node_es_list.append(
+                    readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+                )  # {[n_nodes, ], }
+
+
+        # Concatenate node features
+        node_feats_out = torch.cat(node_feats_list, dim=-1) 
+
+        # Sum over interactions
+        node_inter_es = torch.sum(
+            torch.stack(node_es_list, dim=0), dim=0
+        )  # [n_nodes, ]
+        node_inter_es = self.scale_shift(node_inter_es, node_heads)
+
+        # Sum over nodes in graph
+        inter_e = scatter_sum(
+            src=node_inter_es, index=data["batch"], dim=-1, dim_size=num_graphs
+        )  # [n_graphs,]
+        
+        # Add E_0 and (scaled) interaction energy
+        total_energy = e0 + inter_e
+        node_energy = node_e0 + node_inter_es
+        forces, virials, stress, hessian, magforces = get_outputs(
+            energy=inter_e,
+            positions=data["positions"],
+            displacement=displacement,
+            cell=data["cell"],
+            magmoms=data["magmom"],
+            training=training,
+            compute_force=compute_force,
+            compute_virials=compute_virials,
+            compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
+            compute_magforces=compute_magforces,
+        )
+        output = {
+            "energy": total_energy,
+            "node_energy": node_energy,
+            "interaction_energy": inter_e,
+            "forces": forces,
+            "magforces": magforces,
+            "virials": virials,
+            "stress": stress,
+            "hessian": hessian,
+            "displacement": displacement,
+            "node_feats": node_feats_out,
+        }
+        return output
+
+def natural_cubic_spline_coeffs(x, y):
+    x = x.contiguous()
+    y = y.contiguous()
+    N = x.numel()
+
+    h = x[1:] - x[:-1]
+
+    A = torch.zeros((N, N), device=x.device, dtype=x.dtype)
+    rhs = torch.zeros((N,), device=x.device, dtype=x.dtype)
+
+    A[0, 0] = 1.0
+    A[-1, -1] = 1.0
+
+    for i in range(1, N - 1):
+        A[i, i - 1] = h[i - 1]
+        A[i, i] = 2.0 * (h[i - 1] + h[i])
+        A[i, i + 1] = h[i]
+        rhs[i] = 3.0 * (
+            (y[i + 1] - y[i]) / h[i]
+            - (y[i] - y[i - 1]) / h[i - 1]
+        )
+
+    c_full = torch.linalg.solve(A, rhs)
+
+    a = y[:-1]
+    b = (y[1:] - y[:-1]) / h - h * (2.0 * c_full[:-1] + c_full[1:]) / 3.0
+    c = c_full[:-1]
+    d = (c_full[1:] - c_full[:-1]) / (3.0 * h)
+
+    return a, b, c, d
+
+
+def cubic_spline_eval(xq, x, coeffs):
+    a, b, c, d = coeffs
+    xq = torch.clamp(xq, x[0], x[-1])
+    idx = torch.searchsorted(x[1:], xq)
+    dx = xq - x[idx]
+    return a[idx] + b[idx]*dx + c[idx]*dx**2 + d[idx]*dx**3
+
+
+# ============================================================
+# Even spline model: E(m) = f(m^2)
+# ============================================================
+class EvenSpline1Body(torch.nn.Module):
+    """
+    Returns per-site energies E_i of shape (N,)
+    """
+
+    def __init__(self, m_max, n_knots=40):
+        super().__init__()
+
+        self.n_species = len(m_max)
+        self.n_knots = n_knots
+
+        self.u_knots = torch.nn.ParameterList([
+            torch.nn.Parameter(
+                torch.linspace(0.0, float(m)**2, n_knots),
+                requires_grad=False
+            )
+            for m in m_max
+        ])
+
+        self.y = torch.nn.ParameterList([
+            torch.nn.Parameter(torch.zeros(n_knots))
+            for _ in range(self.n_species)
+        ])
+
+    def forward(self, m, node_attrs):
+        """
+        m          : (N,)
+        node_attrs : (N, n_species) one-hot
+        returns    : site_energy (N,)
+        """
+        m = m.view(-1)
+        u = m * m
+
+        N = m.shape[0]
+        site_energy = torch.zeros(N, device=m.device)
+
+        active_species = torch.nonzero(
+            node_attrs.sum(dim=0), as_tuple=False
+        ).view(-1)
+
+        for s in active_species.tolist():
+            coeffs = natural_cubic_spline_coeffs(
+                self.u_knots[s], self.y[s]
+            )
+            Es = cubic_spline_eval(u, self.u_knots[s], coeffs)
+            site_energy += node_attrs[:, s] * Es
+
+        return site_energy
+
+class EvenMagSaturationBarrier(torch.nn.Module):
+    def __init__(self, m_max, E1, E2, prefactor, lambda_sat=0.05, eps=1e-8, dtype=None):
+        super().__init__()
+        if dtype is None:
+            dtype = torch.get_default_dtype()
+
+        m_max = torch.as_tensor(m_max, dtype=dtype)
+        E1 = torch.as_tensor(E1, dtype=dtype)
+        E2 = torch.as_tensor(E2, dtype=dtype)
+
+        assert m_max.ndim == 1
+        assert E1.shape == m_max.shape
+        assert E2.shape == m_max.shape
+
+        self.n_species = m_max.numel()
+
+        self.register_buffer("m_max", m_max)
+        self.register_buffer("E1", E1)
+        self.register_buffer("E2", E2)
+        self.register_buffer("lambda_sat", torch.tensor(float(lambda_sat), dtype=dtype))
+        self.register_buffer("eps", torch.tensor(float(eps), dtype=dtype))
+        self.register_buffer("prefactor", torch.tensor(prefactor, dtype = dtype))
+
+    def forward(self, m, node_attrs):
+        abs_m = torch.abs(m).view(-1)
+
+        if node_attrs.dim() == 3:
+            node_attrs = node_attrs.squeeze(-1)
+
+        E = torch.zeros_like(abs_m)
+        # skip if zero initialized 
+        if all(torch.isclose(self.prefactor, torch.zeros_like(self.prefactor))):
+            return E
+        
+        for s in range(self.n_species):
+
+            m0 = self.m_max[s]
+
+            # excess moment
+            dm = torch.clamp(abs_m - m0, min=0.0)
+
+            # blow up at |m| = 1.1 * m0
+            dm_max = (self.prefactor[s] - 1.0) * m0
+            
+            y = dm / dm_max
+            y = torch.clamp(y, max=1.0 - self.eps)
+
+            # C2-matching polynomial
+            poly = self.E1[s] * dm + 0.5 * self.E2[s] * dm * dm
+
+            # logarithmic wall
+            wall = (2*y)**3 / (1.0 - y + self.eps)**2
+            wall_term = self.lambda_sat * wall
+            # wall = -torch.log(1.0 - y**2 + self.eps)
+            # wall_term = self.lambda_sat * ((2 * y) ** 3) * wall
+
+            Es = poly + wall_term
+            E = E + node_attrs[:, s] * Es
+        return E
+
+
+@compile_mode("script")
+class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesEvenSplineSelfMagmomScaleShiftMACE(MagneticMACE):
+    def __init__(
+        self,
+        atomic_inter_scale: float,
+        atomic_inter_shift: float,
+        **kwargs,
+    ):
+    
+        self.m_max_1b = kwargs.pop("m_max_1b")
+        super().__init__(**kwargs)
+        self.scale_shift = ScaleShiftBlock(
+            scale=atomic_inter_scale, shift=0.0
+        )
+
+        # modify spherical to solid harmonics for magnetic moment
+        self.mag_solid_harmoics = SHModule(self.mag_spherical_harmonics._lmax)
+        self.mag_spherical_harmonics = None
+        self.magmom_readouts = None
+        self.magmom_products = None
+
+        # coefficient for the chebyshev polynomails
+        self.E_m_spline = EvenSpline1Body(self.m_max_1b)
+        
+        # barrier
+        # self, m_max, E1, E2, lambda_sat=0.05, eps=1e-8, dtype=None
+        self.saturation = EvenMagSaturationBarrier(self.m_max_1b, 
+                                                   np.zeros_like(self.m_max_1b),
+                                                   np.zeros_like(self.m_max_1b),
+                                                   prefactor=np.zeros_like(self.m_max_1b)
+                                                   )
+
+        # correction to shift E0s for each species
+        self.register_buffer(
+            "one_body_magmom_const_correction", torch.zeros(len(self.atomic_numbers), len(self.heads))
+        )
+
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+        compute_hessian: bool = False,
+        compute_magforces: bool = True,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        # Setup
+        data["positions"].requires_grad_(True)
+        data["node_attrs"].requires_grad_(True)
+        data["magmom"].requires_grad_(True)
+        
+        num_graphs = data["ptr"].numel() - 1
+        num_atoms_arange = torch.arange(data["positions"].shape[0])
+        node_heads = (
+            data["head"][data["batch"]]
+            if "head" in data
+            else torch.zeros_like(data["batch"])
+        )
+        displacement = torch.zeros(
+            (num_graphs, 3, 3),
+            dtype=data["positions"].dtype,
+            device=data["positions"].device,
+        )
+        if compute_virials or compute_stress or compute_displacement:
+            (
+                data["positions"],
+                data["shifts"],
+                displacement,
+            ) = get_symmetric_displacement(
+                positions=data["positions"],
+                unit_shifts=data["unit_shifts"],
+                cell=data["cell"],
+                edge_index=data["edge_index"],
+                num_graphs=num_graphs,
+                batch=data["batch"],
+            )
+
+        # Atomic energies
+        node_e0 = self.atomic_energies_fn(data["node_attrs"])[
+            num_atoms_arange, node_heads
+        ]
+        e0 = scatter_sum(
+            src=node_e0, index=data["batch"], dim=0, dim_size=num_graphs
+        )  # [n_graphs, num_heads]
+
+        # node embedding on species
+        node_feats = self.node_embedding(data["node_attrs"])
+
+        # prepare the Rnl and Ylm
+        vectors, lengths = get_edge_vectors_and_lengths(
+            positions=data["positions"],
+            edge_index=data["edge_index"],
+            shifts=data["shifts"],
+        )
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats = self.radial_embedding(
+            lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+        )
+        if hasattr(self, "pair_repulsion"):
+            pair_node_energy = self.pair_repulsion_fn(
+                lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+            )
+        else:
+            pair_node_energy = torch.zeros_like(node_e0)
+
+        # --- magnetic stuffs ---
+        
+        magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
+        element_dependent_scaling = self.m_max[torch.argmax(data["node_attrs"], dim=1)].unsqueeze(-1)
+        element_dependent_scaling.requires_grad_(True)
+        element_dependent_scaling.retain_grad()
+        
+        magmom_lenghts_trans = 1 - 2 * (magmom_lenghts / element_dependent_scaling) ** 2
+        magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
+
+        #
+        magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
+        
+        # Interactions
+        node_es_list = [pair_node_energy]
+        node_feats_list = []
+        magmom_node_feats_list = []
+        for (idx, (interaction, product, readout)) in enumerate(zip(
+            self.interactions, self.products, self.readouts
+        )):
+            node_feats, sc = interaction(
+                node_attrs=data["node_attrs"],
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=data["edge_index"],
+                magmom_node_inv_feats=magmom_node_feats,
+                magmom_node_attrs=magmom_node_attrs
+            )
+          
+            node_feats = product(
+                node_feats=node_feats, sc=sc,node_attrs=data["node_attrs"], 
+                magmom_node_inv_feats=magmom_node_feats,
+                magmom_node_attrs=magmom_node_attrs,
+            )
+            
+            node_feats_list.append(node_feats)
+            node_es_list.append(
+                readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+            )  # {[n_nodes, ], }
+
+        # assume only single head
+        onebody_magmom_contri = self.E_m_spline(magmom_lenghts, data['node_attrs']).unsqueeze(-1)
+        
+        #
+        one_body_correction = torch.einsum(
+                    'ns,sh->nh', data["node_attrs"], self.one_body_magmom_const_correction
+                )
+        assert one_body_correction.shape[1] == 1
+        # apply correction so that the zero matches E0 exactly
+        onebody_magmom_contri -=  one_body_correction
+
+        if self.saturation is not None:
+            saturation_correction = self.saturation(magmom_lenghts, data['node_attrs']).unsqueeze(-1)
+            onebody_magmom_contri += saturation_correction
+
+        # Concatenate node features
+        node_feats_out = torch.cat(node_feats_list, dim=-1) 
+
+        # Sum over interactions
+        node_inter_es = torch.sum(
+            torch.stack(node_es_list, dim=0), dim=0
+        )  # [n_nodes, ]
+        node_inter_es = self.scale_shift(node_inter_es, node_heads)
+        node_inter_es += onebody_magmom_contri[:, 0]
+        # Sum over nodes in graph
+        inter_e = scatter_sum(
+            src=node_inter_es, index=data["batch"], dim=-1, dim_size=num_graphs
+        )  # [n_graphs,]
+        
+        # Add E_0 and (scaled) interaction energy
+        total_energy = e0 + inter_e
+        node_energy = node_e0 + node_inter_es
+        forces, virials, stress, hessian, magforces = get_outputs(
+            energy=inter_e,
+            positions=data["positions"],
+            displacement=displacement,
+            cell=data["cell"],
+            magmoms=data["magmom"],
+            training=training,
+            compute_force=compute_force,
+            compute_virials=compute_virials,
+            compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
+            compute_magforces=compute_magforces,
+        )
+        output = {
+            "energy": total_energy,
+            "node_energy": node_energy,
+            "interaction_energy": inter_e,
+            "forces": forces,
+            "magforces": magforces,
+            "virials": virials,
+            "stress": stress,
+            "hessian": hessian,
+            "displacement": displacement,
+            "node_feats": node_feats_out,
+        }
+        return output
+
+@compile_mode("script")
+class MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesFixingGinzburgSelfMagmomScaleShiftMACE(MagneticMACE):
+    def __init__(
+        self,
+        atomic_inter_scale: float,
+        atomic_inter_shift: float,
+        **kwargs,
+    ):
+        num_mag_radial_basis_one_body = kwargs.pop("num_mag_radial_basis_one_body")
+        super().__init__(**kwargs)
+        self.scale_shift = ScaleShiftBlock(
+            scale=atomic_inter_scale, shift=0.0
+        )
+
+        # modify spherical to solid harmonics for magnetic moment
+        self.mag_solid_harmoics = SHModule(self.mag_spherical_harmonics._lmax)
+        self.mag_spherical_harmonics = None
+        self.magmom_readouts = None
+        self.magmom_products = None
+
+        self.onebody_magmombasis_list = torch.nn.ModuleList()
+
+        # coefficient for the chebyshev polynomails
+        self.onebody_magmombasis_coeffs = torch.nn.Parameter(torch.randn(len(self.atomic_numbers), num_mag_radial_basis_one_body, len(self.heads)))
+
+        self.one_body_cheb_basis_with_const = ChebychevBasisWithConst(
+            r_max = 1.0,
+            num_basis = num_mag_radial_basis_one_body,
+        )
+
+        # correction to shift E0s for each species
+        self.register_buffer(
+            "one_body_magmom_const_correction", torch.zeros(len(self.atomic_numbers), len(self.heads))
+        )
+
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+        compute_hessian: bool = False,
+        compute_magforces: bool = True,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        # Setup
+        data["positions"].requires_grad_(True)
+        data["node_attrs"].requires_grad_(True)
+        data["magmom"].requires_grad_(True)
+        
+        num_graphs = data["ptr"].numel() - 1
+        num_atoms_arange = torch.arange(data["positions"].shape[0])
+        node_heads = (
+            data["head"][data["batch"]]
+            if "head" in data
+            else torch.zeros_like(data["batch"])
+        )
+        displacement = torch.zeros(
+            (num_graphs, 3, 3),
+            dtype=data["positions"].dtype,
+            device=data["positions"].device,
+        )
+        if compute_virials or compute_stress or compute_displacement:
+            (
+                data["positions"],
+                data["shifts"],
+                displacement,
+            ) = get_symmetric_displacement(
+                positions=data["positions"],
+                unit_shifts=data["unit_shifts"],
+                cell=data["cell"],
+                edge_index=data["edge_index"],
+                num_graphs=num_graphs,
+                batch=data["batch"],
+            )
+
+        # Atomic energies
+        node_e0 = self.atomic_energies_fn(data["node_attrs"])[
+            num_atoms_arange, node_heads
+        ]
+        e0 = scatter_sum(
+            src=node_e0, index=data["batch"], dim=0, dim_size=num_graphs
+        )  # [n_graphs, num_heads]
+
+        # node embedding on species
+        node_feats = self.node_embedding(data["node_attrs"])
+
+        # prepare the Rnl and Ylm
+        vectors, lengths = get_edge_vectors_and_lengths(
+            positions=data["positions"],
+            edge_index=data["edge_index"],
+            shifts=data["shifts"],
+        )
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats = self.radial_embedding(
+            lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+        )
+        if hasattr(self, "pair_repulsion"):
+            pair_node_energy = self.pair_repulsion_fn(
+                lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+            )
+        else:
+            pair_node_energy = torch.zeros_like(node_e0)
+
+        # --- magnetic stuffs ---
+        
+        magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
+        element_dependent_scaling = self.m_max[torch.argmax(data["node_attrs"], dim=1)].unsqueeze(-1)
+        element_dependent_scaling.requires_grad_(True)
+        element_dependent_scaling.retain_grad()
+        
+        magmom_lenghts_trans = 1 - 2 * (magmom_lenghts / element_dependent_scaling)
+        magmom_lenghts_trans_1b = 1 - 2 * (magmom_lenghts / element_dependent_scaling) ** 2
+        magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
+
+        #
+        magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
+
+        # one body contribution radials, this is with constant shift so that it can be fitted
+        magmom_one_body_radials = self.one_body_cheb_basis_with_const(
+            magmom_lenghts_trans_1b
         )
         
         # Interactions
@@ -4294,102 +5060,6 @@ class EnergyDipolesMACE(torch.nn.Module):
 # for a given position. Still later we can do something like:
 # given position also predict the magnetic moment based on the previous magnetic moment
 # to accelerate SCF cycles that have to be done
-# class MagneticSCFMACE(torch.nn.Module):
-#     def __init__(self, model, n_scf_step=10, scf_tol=1e-5, scf_logging=False, scf_step_size=1.0, use_scf = True):
-#         super().__init__()
-#         self.magmom_mace = model # original magnetic mace
-#         self.n_scf_step = n_scf_step
-#         self.scf_tol = scf_tol
-#         self.cache_magmom = None
-#         self.scf_logging = scf_logging
-#         self.scf_step_size = scf_step_size
-#         self.use_scf = use_scf
- 
-#         self.cache_magmom = None
-
-#     def forward(
-#         self,
-#         data: Dict[str, torch.Tensor],
-#         training: bool = False,
-#         compute_force: bool = True,
-#         compute_virials: bool = False,
-#         compute_stress: bool = False,
-#         compute_displacement: bool = False,
-#     ) -> Dict[str, Optional[torch.Tensor]]:
-        
-#         device = next(self.magmom_mace.parameters()).device
-
-        
-#         # === Initialize magmom ===
-#         if "magmom" in data:
-#             magmom = data["magmom"].detach().to(device).clone()
-#         elif self.cache_magmom is not None:
-#             magmom = self.cache_magmom.clone()
-#         else:
-#             raise ValueError("No initial magnetic moment provided and no cache available.")
-
-#         magmom = magmom.to(device)
-#         magmom.requires_grad_(True)
-#         energy_history = []
-
-#         # === Define optimizer ===
-#         if self.use_scf:
-#             optimizer = torch.optim.LBFGS([magmom], max_iter=self.n_scf_step, tolerance_grad=self.scf_tol, \
-#                                           line_search_fn="strong_wolfe", lr=self.scf_step_size)
-
-#             def closure():
-#                 optimizer.zero_grad()
-
-#                 # Update magnetic moments in config
-#                 data["magmom"] = magmom
-
-#                 # Evaluate model
-#                 output = self.magmom_mace(
-#                     data,
-#                     training=training,
-#                     compute_force=compute_force,
-#                     compute_virials=compute_virials,
-#                     compute_stress=compute_stress,
-#                     compute_displacement=compute_displacement,
-#                 )
-
-#                 energy = output["energy"][0]
-#                 energy_history.append(energy.item())
-
-#                 # Set gradient manually from mag_forces
-#                 magmom.grad = -output["magforces"].detach()
-#                 if self.scf_logging:
-#                     print(f"[SCF LBFGS] Energy = {energy.item():.6f} | Mag force norm = {magmom.grad.norm().item():.6f}")
-#                 return energy
-
-#             optimizer.step(closure)
-
-#             # Cache final magnetic moments
-#             self.cache_magmom = magmom.detach()
-
-#             # Final output (evaluate one last time with final magmom)
-#             data["dft_magmom"] = magmom
-
-#         final_output = self.magmom_mace(
-#             data,
-#             training=training,
-#             compute_force=compute_force,
-#             compute_virials=compute_virials,
-#             compute_stress=compute_stress,
-#             compute_displacement=compute_displacement,
-#         )
-
-#         # Add SCF info to output
-#         final_output["scf_energy_history"] = torch.tensor(energy_history, dtype=torch.float32)
-#         final_output["scf_steps"] = len(energy_history)
-#         final_output["equilibrated_magmom"] = magmom.detach()
-
-#         return final_output
-
-# this does not differentiate through SCF but just a convenient wrapper for equilibrating magmom 
-# for a given position. Still later we can do something like:
-# given position also predict the magnetic moment based on the previous magnetic moment
-# to accelerate SCF cycles that have to be done
 class MagneticSCFMACE(torch.nn.Module):
     """
     SCF wrapper for magnetic moment equilibration under an applied magnetic field.
@@ -4404,6 +5074,7 @@ class MagneticSCFMACE(torch.nn.Module):
         use_scf=True,
         return_magmom_hist=False,
         constrain_magnitude=False,
+        use_collinear=False,
     ):
         super().__init__()
         self.magmom_mace = model
@@ -4414,7 +5085,7 @@ class MagneticSCFMACE(torch.nn.Module):
         self.use_scf = use_scf
         self.return_magmom_hist = return_magmom_hist
         self.constrain_magnitude = constrain_magnitude
-
+        self.use_collinear = use_collinear
         self.cache_magmom = None
 
     def forward(
@@ -4443,7 +5114,7 @@ class MagneticSCFMACE(torch.nn.Module):
         energy_history = []
         grad_norm_history = []
         scf_iter = []
-        magmom_history = [magmom.detach().clone(),]
+        magmom_history = []
         # === Prepare applied magnetic field ===
         if applied_B_field is not None:
             applied_B_field = applied_B_field.to(device)
@@ -4509,6 +5180,18 @@ class MagneticSCFMACE(torch.nn.Module):
                     # g_parallel = g - (g·n)n
                     raw_grad = raw_grad - (raw_grad * mu_norm).sum(dim=1, keepdim=True) * mu_norm
 
+                # ----------------------------------
+                # Gradient clipping (global norm)
+                # ----------------------------------
+                # max_grad_norm = 1.0  # tune this (0.01–0.2 typical)
+
+                # grad_norm = raw_grad.norm()
+                # if grad_norm > max_grad_norm:
+                #     raw_grad = raw_grad * (max_grad_norm / (grad_norm + 1e-12))
+                # after computing raw_grad
+                if self.use_collinear:
+                    raw_grad[:, 0] = 0.0
+                    raw_grad[:, 1] = 0.0
                 # assign gradient manually
                 magmom.grad = raw_grad
 
@@ -4633,8 +5316,8 @@ class MagneticSCFMACE(torch.nn.Module):
             zeeman_energy = -mu_B * (magmom * applied_B_field).sum()
             final_output["energy"] = final_output["energy"] + zeeman_energy
 
-        final_output["scf_energy_history"] = torch.tensor(energy_history, dtype=torch.float32)
-        final_output["grad_norm_history"] = torch.tensor(grad_norm_history, dtype=torch.float32)
+        final_output["scf_energy_history"] = torch.tensor(energy_history, dtype=torch.float64)
+        final_output["grad_norm_history"] = torch.tensor(grad_norm_history, dtype=torch.float64)
         final_output["scf_steps"] = len(energy_history)
         final_output["equilibrated_magmom"] = magmom.detach()
         final_output["applied_field"] = applied_B_field

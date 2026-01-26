@@ -138,6 +138,9 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
             "MagneticSolidHarmonicsNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
             "MagneticSolidHarmonicsFixingNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesFixingGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomFixingScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesEvenSplineSelfMagmomScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -596,6 +599,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "huber",
             "universal",
             "energy_forces_dipole",
+            "EvenSpline1BodyLoss",
         ],
     )
     parser.add_argument(
@@ -900,6 +904,24 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--m_max",
         help="|m| basis m_max for magnetic momgent",
+        type=float,
+        nargs='+',
+    )
+    parser.add_argument(
+        "--m_max_1b",
+        help="|m| basis m_max for one body magnetic momgent",
+        type=float,
+        nargs='+',
+    )
+    parser.add_argument(
+        "--prefactor",
+        help="|m| basis m_max for one body magnetic momgent",
+        type=float,
+        nargs='+',
+    )
+    parser.add_argument(
+        "--lambda_smooth",
+        help="regularization constant used",
         type=float,
         nargs='+',
     )

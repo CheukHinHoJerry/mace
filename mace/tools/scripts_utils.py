@@ -711,6 +711,10 @@ def get_loss_fn(
             forces_weight=args.forces_weight,
             dipole_weight=args.dipole_weight,
         )
+    elif args.loss == "EvenSpline1BodyLoss":
+        loss_fn = modules.EvenSpline1BodyLoss(
+            lambda_smooth = 3e-1,
+        )
     else:
         loss_fn = modules.WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=1.0)
     return loss_fn
@@ -850,11 +854,13 @@ def get_params_options(
                           list(model.onebody_magmombasis_list.parameters()),
                 "weight_decay": 0.0,
             })
-            # params_list.append({
-            #     "name": "Ginzburg_coeffs",
-            #     "params": [model.Ginzburg_Landau_coeffs,],
-            #     "weight_decay": 0.0,
-            # })
+
+    if "EvenSpline" in model.__class__.__name__ and args.train_one_body_contribution:
+            params_list.append({
+                "name": "E_m_spline.y",
+                "params": list(model.E_m_spline.y),
+                "weight_decay": 0.0,
+            })
             
 
     logging.info("params_list:", params_list)
