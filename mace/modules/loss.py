@@ -401,14 +401,15 @@ class UniversalLoss(torch.nn.Module):
         self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
     ) -> torch.Tensor:
         num_atoms = ref.ptr[1:] - ref.ptr[:-1]
-        configs_stress_weight = ref.stress_weight.view(-1, 1, 1)
-        configs_energy_weight = ref.energy_weight
+        configs_stress_weight = (ref.stress_weight * ref.weight).view(-1, 1, 1)
+        configs_energy_weight = ref.energy_weight * ref.weight
         configs_forces_weight = torch.repeat_interleave(
-            ref.forces_weight, ref.ptr[1:] - ref.ptr[:-1]
+            ref.forces_weight * ref.weight, ref.ptr[1:] - ref.ptr[:-1]
         ).unsqueeze(-1)
         configs_magforces_weight = torch.repeat_interleave(
-            ref.magforces_weight, ref.ptr[1:] - ref.ptr[:-1]
+            ref.magforces_weight * ref.weight, ref.ptr[1:] - ref.ptr[:-1]
         ).unsqueeze(-1)
+
         if ddp:
             loss_energy = torch.nn.functional.huber_loss(
                 configs_energy_weight * ref["energy"] / num_atoms,
@@ -589,4 +590,44 @@ class WeightedEnergyForcesL1L2Loss(torch.nn.Module):
         return (
             f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
             f"forces_weight={self.forces_weight:.3f})"
+        )
+
+class EvenSpline1BodyLoss(torch.nn.Module):
+    def __init__(self, lambda_smooth=3e-1,) -> None:
+        super().__init__()
+        self.register_buffer(
+            "lambda_smooth",
+            torch.tensor(lambda_smooth, dtype=torch.get_default_dtype()),
+        )
+
+    def curvature_penalty(self, y):
+        # second finite difference ~ f''(u)
+        d2 = y[:-2] - 2*y[1:-1] + y[2:]
+        return torch.mean(d2**2)
+    
+    def forward(
+        self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
+    ) -> torch.Tensor:
+        # import pdb; pdb.set_trace();
+        data_loss = torch.mean((ref['energy'] - pred['energy'])**2)
+        
+        # --- curvature penalty grouped by element ---
+        smooth_losses = []
+        energy = pred["energy"]                 # [N]
+        node_attrs = ref.node_attrs              # [N, n_elem]
+        for elem_idx in range(node_attrs.shape[1]):
+            mask = node_attrs[:, elem_idx].bool()
+            y_elem = energy[mask]
+            smooth_losses.append(self.curvature_penalty(y_elem))
+
+        if smooth_losses:
+            smooth_loss = torch.stack(smooth_losses).mean()
+        else:
+            smooth_loss = energy.new_tensor(0.0)
+
+        return data_loss + self.lambda_smooth * smooth_loss
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(lambda_smooth={self.lambda_smooth})"
         )
