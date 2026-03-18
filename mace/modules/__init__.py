@@ -31,6 +31,8 @@ from .blocks import (
     MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock,
     MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock,
     MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+    MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock,
     ScaleShiftBlock,
 )
 from .loss import (
@@ -104,6 +106,9 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock,
     "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock,
     "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+    "MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+
 }
 
 scaling_classes: Dict[str, Callable] = {

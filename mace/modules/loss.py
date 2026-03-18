@@ -608,7 +608,6 @@ class EvenSpline1BodyLoss(torch.nn.Module):
     def forward(
         self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
     ) -> torch.Tensor:
-        # import pdb; pdb.set_trace();
         data_loss = torch.mean((ref['energy'] - pred['energy'])**2)
         
         # --- curvature penalty grouped by element ---

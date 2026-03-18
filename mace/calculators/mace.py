@@ -740,7 +740,12 @@ class MagneticMACECalculator(Calculator):
                 ret_tensors["scf_steps"] = out["scf_steps"] # .detach()
             if "scf_energy_history" in out.keys():
                 ret_tensors["scf_energy_history"] = out["scf_energy_history"] # .detach()
-            
+            if "grad_history" in out.keys():
+                ret_tensors["grad_history"] = out["grad_history"]
+            if "grad_inf_history" in out.keys():
+                ret_tensors["grad_inf_history"] = out["grad_inf_history"]
+            if "step_inf_history" in out.keys():
+                ret_tensors["step_inf_history"] = out["step_inf_history"]
 
         self.results = {}
         if self.model_type in ["MACE", "EnergyDipoleMACE"]:
@@ -772,6 +777,15 @@ class MagneticMACECalculator(Calculator):
 
             if "one_body_magmom_energy" in ret_tensors.keys():
                 self.results['one_body_magmom_energy'] = ret_tensors["one_body_magmom_energy"].cpu().detach().numpy()
+
+            if "grad_history" in ret_tensors.keys():
+                self.results['grad_history'] = ret_tensors["grad_history"].cpu().numpy()
+
+            if "grad_inf_history" in ret_tensors.keys():
+                self.results['grad_inf_history'] = ret_tensors["grad_inf_history"].cpu().numpy()
+
+            if "step_inf_history" in ret_tensors.keys():
+                self.results['step_inf_history'] = ret_tensors["step_inf_history"].cpu().numpy()
 
             if self.num_models > 1:
                 assert 1 == 0

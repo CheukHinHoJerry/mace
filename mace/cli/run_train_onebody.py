@@ -1054,12 +1054,7 @@ def run(args) -> None:
     E1  = torch.stack(E1_list)   # (n_species,)
     E2  = torch.stack(E2_list)   # (n_species,)
 
-    model.saturation = EvenMagSaturationBarrier(
-        m_max=torch.as_tensor(np.array(args.m_max)/np.array(args.prefactor), device=device, dtype=E0.dtype),
-        E2=E2.to(device),
-        E1=E1.to(device),
-        prefactor=args.prefactor
-    ).to(device)
+    model.saturation = EvenMagSaturationBarrier(m_max=torch.as_tensor(np.array(args.m_max)/np.array(args.prefactor), device=device, dtype=E0.dtype),E2=E2.to(device),E1=E1.to(device),prefactor=args.prefactor).to(device)
     
     checkpoint_handler.save(state=CheckpointState(model, optimizer, lr_scheduler), epochs=0, keep_last=True,)
     model_path = Path(args.checkpoints_dir) / (tag + ".model")

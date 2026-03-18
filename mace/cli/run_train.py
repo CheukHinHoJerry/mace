@@ -802,7 +802,7 @@ def run(args) -> None:
     if args.wandb:
         setup_wandb(args)
     if args.distributed:
-        distributed_model = DDP(model, device_ids=[local_rank])
+        distributed_model = DDP(model, device_ids=[local_rank], find_unused_parameters=True,)
     else:
         distributed_model = None
 

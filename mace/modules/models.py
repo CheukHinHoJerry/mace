@@ -5069,17 +5069,20 @@ class MagneticSCFMACE(torch.nn.Module):
         model,
         n_scf_step=10,
         scf_tol=1e-5,
+        scf_tol_diff=1e-9,
         scf_logging=False,
         scf_step_size=1.0,
         use_scf=True,
         return_magmom_hist=False,
         constrain_magnitude=False,
         use_collinear=False,
+        mask_ats=None
     ):
         super().__init__()
         self.magmom_mace = model
         self.n_scf_step = n_scf_step
         self.scf_tol = scf_tol
+        self.scf_tol_diff = scf_tol_diff
         self.scf_logging = scf_logging
         self.scf_step_size = scf_step_size
         self.use_scf = use_scf
@@ -5087,6 +5090,7 @@ class MagneticSCFMACE(torch.nn.Module):
         self.constrain_magnitude = constrain_magnitude
         self.use_collinear = use_collinear
         self.cache_magmom = None
+        self.mask_ats = mask_ats
 
     def forward(
         self,
@@ -5113,8 +5117,10 @@ class MagneticSCFMACE(torch.nn.Module):
         magmom.requires_grad_(True)
         energy_history = []
         grad_norm_history = []
-        scf_iter = []
+        grad_history = []
         magmom_history = []
+        grad_inf_history = []
+        step_inf_history = []
         # === Prepare applied magnetic field ===
         if applied_B_field is not None:
             applied_B_field = applied_B_field.to(device)
@@ -5134,6 +5140,7 @@ class MagneticSCFMACE(torch.nn.Module):
                 [magmom],
                 max_iter=self.n_scf_step,
                 tolerance_grad=self.scf_tol,
+                tolerance_change=self.scf_tol_diff,
                 line_search_fn="strong_wolfe",
                 lr=self.scf_step_size,
             )
@@ -5189,9 +5196,20 @@ class MagneticSCFMACE(torch.nn.Module):
                 # if grad_norm > max_grad_norm:
                 #     raw_grad = raw_grad * (max_grad_norm / (grad_norm + 1e-12))
                 # after computing raw_grad
+                # ==== a bunch of constrains =====
                 if self.use_collinear:
                     raw_grad[:, 0] = 0.0
                     raw_grad[:, 1] = 0.0
+                # ----------------------------------
+                # Freeze magnetic moments for masked atoms
+                # ----------------------------------
+                if self.mask_ats is not None:
+                    if isinstance(self.mask_ats, (list, tuple)):
+                        raw_grad[self.mask_ats] = 0.0
+                    else:
+                        # assume boolean mask of shape (N,)
+                        raw_grad[self.mask_ats] = 0.0
+
                 # assign gradient manually
                 magmom.grad = raw_grad
 
@@ -5202,17 +5220,37 @@ class MagneticSCFMACE(torch.nn.Module):
                     if applied_B_field is not None:
                         print(f"Zeeman Energy = {zeeman_energy.item():.6f}")
 
+                # flat gradient used by LBFGS
+                flat_grad = optimizer._gather_flat_grad()
+                grad_inf = flat_grad.abs().max().item()
+
+                # LBFGS step direction and step size
+                state = optimizer.state[magmom]
+                d = state.get("d")
+                t = state.get("t")
+
+                if d is not None and t is not None:
+                    step_inf = (t * d).abs().max().item()
+                else:
+                    step_inf = np.nan
+
+
                 # log data
-                energy_history.append(energy.item())
+                energy_history.append(energy.clone().item())
                 magmom_history.append(magmom.detach().clone())
                 grad_norm_history.append(magmom.grad.norm().item())
-
+                grad_history.append(magmom.grad.detach().clone())
+                grad_inf_history.append(grad_inf)
+                step_inf_history.append(step_inf)
                 return energy
 
             # ----------------------------------
             # LBFGS optimization step
             # ----------------------------------
             optimizer.step(closure)
+            # if self.mask_ats is not None:
+            #     with torch.no_grad():
+            #         magmom[self.mask_ats] = self.cache_magmom[self.mask_ats]
 
             # --------------------------------------------------------
             # ENFORCE FIXED MAGNITUDE OF MAGMOM AFTER LBFGS UPDATE
@@ -5315,12 +5353,16 @@ class MagneticSCFMACE(torch.nn.Module):
         if applied_B_field is not None:
             zeeman_energy = -mu_B * (magmom * applied_B_field).sum()
             final_output["energy"] = final_output["energy"] + zeeman_energy
-
         final_output["scf_energy_history"] = torch.tensor(energy_history, dtype=torch.float64)
         final_output["grad_norm_history"] = torch.tensor(grad_norm_history, dtype=torch.float64)
         final_output["scf_steps"] = len(energy_history)
         final_output["equilibrated_magmom"] = magmom.detach()
         final_output["applied_field"] = applied_B_field
+        if self.use_scf:
+            final_output["grad_history"] = torch.stack(grad_history)
+            final_output["grad_inf_history"] = torch.tensor(grad_inf_history)
+            final_output["step_inf_history"] = torch.tensor(step_inf_history)
+
         if self.return_magmom_hist:
             final_output["magmom_history"] = torch.stack(magmom_history)
 
