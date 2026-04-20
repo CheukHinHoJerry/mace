@@ -604,12 +604,14 @@ class PolarMACE(ScaleShiftMACE):
         use_pbc_evaluator: bool = False,
         fermi_level: Optional[torch.Tensor] = None,
         external_field: Optional[torch.Tensor] = None,
+        pointwise_external_field: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
         if not GRAPH_LONGRANGE_AVAILABLE:
             raise ImportError(
                 "Cannot import 'graph_longrange'. Please install graph_electrostatics "
                 "from https://github.com/WillBaldwin0/graph_electrostatics."
             )
+        
         ctx = prepare_graph(
             data,
             compute_virials=compute_virials,
@@ -638,6 +640,18 @@ class PolarMACE(ScaleShiftMACE):
         external_potential = torch.hstack(
             (torch.zeros_like(fermi_level).unsqueeze(-1), external_field)
         )
+
+        # Per-atom node-wise external field [N_atoms, 3]: gauge already handled
+        # externally (e.g. by OpenMM).  Kept separate from the per-graph
+        # external_field which still goes through the gauge transform in gto_utils.
+        _pef = pointwise_external_field
+        if _pef is None:
+            if isinstance(data, dict):
+                _pef = data.get("pointwise_external_field", None)
+            else:
+                _pef = getattr(data, "pointwise_external_field", None)
+        # [N_atoms, 3] or None
+
         charges_to_mul_ir = getattr(self, "_charges_to_mul_ir", None)
 
         node_e0 = self.atomic_energies_fn(data["node_attrs"])[
@@ -803,11 +817,35 @@ class PolarMACE(ScaleShiftMACE):
                 dim=0,
                 dim_size=num_graphs,
             ).to(positions.dtype)
+            pos_rel = positions - barycenter[data["batch"], :]
+            # Per-graph homogeneous field: gauge transform done inside gto_utils.
             half_external_field = 0.5 * self.external_field_contribution(
-                data["batch"],
-                positions - barycenter[data["batch"], :],
-                external_potential,
+                data["batch"], pos_rel, external_potential
             )
+            if _pef is not None:
+                # Per-atom node-wise external input:
+                # - [N, 3] interpreted as [Ex, Ey, Ez] with V=0
+                # - [N, 4] interpreted as [V, Ex, Ey, Ez]
+                if _pef.shape[-1] == 3:
+                    pef_4col = torch.cat(
+                        [
+                            torch.zeros(
+                                _pef.shape[0], 1, dtype=_pef.dtype, device=_pef.device
+                            ),
+                            _pef,
+                        ],
+                        dim=-1,
+                    )
+                elif _pef.shape[-1] == 4:
+                    pef_4col = _pef
+                else:
+                    raise ValueError(
+                        "pointwise_external_field must have shape [N,3] or [N,4], "
+                        f"got {tuple(_pef.shape)}"
+                    )
+                half_external_field = half_external_field + 0.5 * self.external_field_contribution(
+                    data["batch"], pos_rel, pef_4col, per_atom=True
+                )
             field_feats_alpha = (
                 field_feats_alpha + half_external_field
             ) / self.field_feature_norms
@@ -922,11 +960,29 @@ class PolarMACE(ScaleShiftMACE):
             pbc=data["pbc"].view(-1, 3),
             force_pbc_evaluator=use_pbc_evaluator,
         )
+        # Homogeneous field couples to total dipole (existing convention).
         total_energy = (
             total_energy
             + electro_energy
             + torch.sum(external_potential[:, 1:] * total_dipole, dim=-1)
         )
+        # === (new) Per-atom node-wise field couples to per-atom GTO dipole moments. ===
+        if _pef is not None and charge_density_mul_ir.shape[1] > 1:
+            # CS order: [l1z, l1x, l1y] → Cartesian [x, y, z] = indices [2, 3, 1]
+            mu_i = charge_density_mul_ir[:, [2, 3, 1]]
+            if _pef.shape[-1] == 4:
+                pef_vec = _pef[:, 1:]
+            elif _pef.shape[-1] == 3:
+                pef_vec = _pef
+            else:
+                raise ValueError(
+                    "pointwise_external_field must have shape [N,3] or [N,4], "
+                    f"got {tuple(_pef.shape)}"
+                )
+            pef_dip = scatter_sum(
+                (pef_vec * mu_i).sum(-1), data["batch"], dim=0, dim_size=num_graphs
+            )
+            total_energy = total_energy + pef_dip
 
         forces, virials, stress, hessian, edge_forces = get_outputs(
             energy=total_energy,

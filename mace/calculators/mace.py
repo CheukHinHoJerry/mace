@@ -142,7 +142,9 @@ class MACECalculator(Calculator):
                 "external_field": "external_field",
             }
         if arrays_keys is None:
-            arrays_keys = {}
+            arrays_keys = {
+                "pointwise_external_field": "pointwise_external_field",
+            }
         self.info_keys = info_keys
         self.arrays_keys = arrays_keys
 
