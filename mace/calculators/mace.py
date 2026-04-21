@@ -140,6 +140,9 @@ class MACECalculator(Calculator):
                 "total_spin": "spin",
                 "total_charge": "charge",
                 "external_field": "external_field",
+                "mm_positions": "mm_positions",
+                "mm_charges": "mm_charges",
+                "mm_source_batch": "mm_source_batch",
             }
         if arrays_keys is None:
             arrays_keys = {
@@ -389,6 +392,9 @@ class MACECalculator(Calculator):
                     "spins": [num_atoms],
                     "density_coefficients": [num_atoms, self.density_dim],
                     "spin_charge_density": [num_atoms, 2, self.density_dim],
+                    "mm_forces": [batch["mm_positions"].shape[0], 3]
+                    if "mm_positions" in batch
+                    else None,
                 }
             )
         dict_of_tensors = {}
@@ -528,6 +534,11 @@ class MACECalculator(Calculator):
                     ("spins", "spins", 1.0),
                     ("density_coefficients", "density_coefficients", 1.0),
                     ("spin_charge_density", "spin_charge_density", 1.0),
+                    (
+                        "mm_forces",
+                        "mm_forces",
+                        self.energy_units_to_eV / self.length_units_to_A,
+                    ),
                 ]
             )
         for results_key, ret_key, unit_conv in results_map:

@@ -23,7 +23,12 @@ from mace.modules.blocks import (
     NonLinearReadoutBlock,
 )
 from mace.modules.models import ScaleShiftMACE
-from mace.modules.utils import get_atomic_virials_stresses, get_outputs, prepare_graph
+from mace.modules.utils import (
+    compute_forces,
+    get_atomic_virials_stresses,
+    get_outputs,
+    prepare_graph,
+)
 from mace.modules.wrapper_ops import (
     CuEquivarianceConfig,
     OEQConfig,
@@ -301,6 +306,17 @@ class MACELES(ScaleShiftMACE):
 
 def _permute_to_e3nn_convention(x: torch.Tensor) -> torch.Tensor:
     return x[..., torch.LongTensor([1, 2, 0]).to(x.device)]
+
+
+def _get_optional_data_tensor(
+    data: Dict[str, torch.Tensor], key: str
+) -> Optional[torch.Tensor]:
+    if isinstance(data, dict):
+        return data.get(key, None)
+    try:
+        return getattr(data, key, None)
+    except AttributeError:
+        return None
 
 
 @compile_mode("script")
@@ -589,6 +605,104 @@ class PolarMACE(ScaleShiftMACE):
             cueq_config=cueq_config,
         )
 
+    def _compute_mm_field_features(
+        self,
+        data: Dict[str, torch.Tensor],
+        positions: torch.Tensor,
+        source_dim: int,
+        charges_to_mul_ir: Optional[torch.nn.Module],
+        k_vectors: torch.Tensor,
+        kv_norms_squared: torch.Tensor,
+        k_vectors_batch: torch.Tensor,
+        k_vectors_0mask: torch.Tensor,
+        volume: torch.Tensor,
+        pbc: torch.Tensor,
+        use_pbc_evaluator: bool,
+        training: bool,
+        compute_force: bool,
+        compute_hessian: bool,
+        compute_edge_forces: bool,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        mm_positions = _get_optional_data_tensor(data, "mm_positions")
+        mm_charges = _get_optional_data_tensor(data, "mm_charges")
+        if mm_positions is None or mm_charges is None:
+            return None, None
+
+        mm_positions = mm_positions.to(device=positions.device, dtype=positions.dtype)
+        mm_charges = mm_charges.to(device=positions.device, dtype=positions.dtype).reshape(-1)
+        if mm_positions.numel() == 0 or mm_charges.numel() == 0:
+            return None, None
+        if mm_positions.dim() != 2 or mm_positions.shape[-1] != 3:
+            raise ValueError(
+                f"mm_positions must have shape [N_mm, 3], got {tuple(mm_positions.shape)}"
+            )
+        if mm_positions.shape[0] != mm_charges.shape[0]:
+            raise ValueError(
+                "mm_positions and mm_charges must have the same leading dimension, got "
+                f"{mm_positions.shape[0]} and {mm_charges.shape[0]}"
+            )
+
+        mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
+        if mm_source_batch is None:
+            if int(pbc.shape[0]) != 1:
+                raise ValueError(
+                    "mm_source_batch is required when batching more than one graph."
+                )
+            mm_source_batch = torch.zeros(
+                mm_positions.shape[0], dtype=torch.long, device=positions.device
+            )
+        else:
+            mm_source_batch = (
+                mm_source_batch.to(device=positions.device, dtype=torch.long).reshape(-1)
+            )
+        if mm_source_batch.shape[0] != mm_positions.shape[0]:
+            raise ValueError(
+                "mm_source_batch must match mm_positions length, got "
+                f"{mm_source_batch.shape[0]} and {mm_positions.shape[0]}"
+            )
+
+        n_mm = mm_positions.shape[0]
+        need_grad_mm = compute_force or training or compute_hessian or compute_edge_forces
+        if need_grad_mm:
+            mm_positions = mm_positions.clone().requires_grad_(True)
+        source_feats_mm = torch.zeros(
+            (n_mm, source_dim), dtype=positions.dtype, device=positions.device
+        )
+        source_feats_mm[:, 0] = mm_charges
+        if charges_to_mul_ir is not None:
+            source_feats_mm = charges_to_mul_ir(source_feats_mm)
+
+        qm_zeros = torch.zeros(
+            (positions.shape[0], source_feats_mm.shape[-1]),
+            dtype=source_feats_mm.dtype,
+            device=source_feats_mm.device,
+        )
+        all_positions = torch.cat((mm_positions, positions), dim=0)
+        all_batch = torch.cat((mm_source_batch, data["batch"]), dim=0)
+        all_source_feats = torch.cat((source_feats_mm, qm_zeros), dim=0)
+
+        mm_cache = self.electric_potential_descriptor.precompute_geometry(
+            k_vectors=k_vectors,
+            k_norm2=kv_norms_squared,
+            k_vector_batch=k_vectors_batch,
+            k0_mask=k_vectors_0mask,
+            node_positions=all_positions,
+            batch=all_batch,
+            volume=volume,
+            pbc=pbc,
+            force_pbc_evaluator=use_pbc_evaluator,
+        )
+        mm_field_feats = self.electric_potential_descriptor.forward_dynamic(
+            cache=mm_cache,
+            source_feats=all_source_feats.unsqueeze(-2),
+            pbc=pbc,
+        )
+        mm_field_feats = mm_field_feats[n_mm:]
+        field_from_mul_ir = getattr(self, "_field_from_mul_ir", None)
+        if field_from_mul_ir is not None:
+            mm_field_feats = field_from_mul_ir(mm_field_feats)
+        return mm_field_feats, mm_positions
+
     def forward(
         self,
         data: Dict[str, torch.Tensor],
@@ -604,14 +718,12 @@ class PolarMACE(ScaleShiftMACE):
         use_pbc_evaluator: bool = False,
         fermi_level: Optional[torch.Tensor] = None,
         external_field: Optional[torch.Tensor] = None,
-        pointwise_external_field: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
         if not GRAPH_LONGRANGE_AVAILABLE:
             raise ImportError(
                 "Cannot import 'graph_longrange'. Please install graph_electrostatics "
                 "from https://github.com/WillBaldwin0/graph_electrostatics."
             )
-        
         ctx = prepare_graph(
             data,
             compute_virials=compute_virials,
@@ -640,18 +752,6 @@ class PolarMACE(ScaleShiftMACE):
         external_potential = torch.hstack(
             (torch.zeros_like(fermi_level).unsqueeze(-1), external_field)
         )
-
-        # Per-atom node-wise external field [N_atoms, 3]: gauge already handled
-        # externally (e.g. by OpenMM).  Kept separate from the per-graph
-        # external_field which still goes through the gauge transform in gto_utils.
-        _pef = pointwise_external_field
-        if _pef is None:
-            if isinstance(data, dict):
-                _pef = data.get("pointwise_external_field", None)
-            else:
-                _pef = getattr(data, "pointwise_external_field", None)
-        # [N_atoms, 3] or None
-
         charges_to_mul_ir = getattr(self, "_charges_to_mul_ir", None)
 
         node_e0 = self.atomic_energies_fn(data["node_attrs"])[
@@ -742,6 +842,23 @@ class PolarMACE(ScaleShiftMACE):
             pbc=data["pbc"].view(-1, 3),
             force_pbc_evaluator=use_pbc_evaluator,
         )
+        mm_field_feats, mm_positions_for_grad = self._compute_mm_field_features(
+            data=data,
+            positions=positions,
+            source_dim=spin_charge_density.shape[-1] // 2,
+            charges_to_mul_ir=charges_to_mul_ir,
+            k_vectors=k_vectors,
+            kv_norms_squared=kv_norms_squared,
+            k_vectors_batch=k_vectors_batch,
+            k_vectors_0mask=k_vectors_0mask,
+            volume=data["volume"],
+            pbc=data["pbc"].view(-1, 3),
+            use_pbc_evaluator=use_pbc_evaluator,
+            training=training,
+            compute_force=compute_force,
+            compute_hessian=compute_hessian,
+            compute_edge_forces=compute_edge_forces,
+        )
 
         # SCF fixed point
         features_mixed = self.layer_feature_mixer(torch.stack(node_feats_list, dim=0))
@@ -817,35 +934,13 @@ class PolarMACE(ScaleShiftMACE):
                 dim=0,
                 dim_size=num_graphs,
             ).to(positions.dtype)
-            pos_rel = positions - barycenter[data["batch"], :]
-            # Per-graph homogeneous field: gauge transform done inside gto_utils.
             half_external_field = 0.5 * self.external_field_contribution(
-                data["batch"], pos_rel, external_potential
+                data["batch"],
+                positions - barycenter[data["batch"], :],
+                external_potential,
             )
-            if _pef is not None:
-                # Per-atom node-wise external input:
-                # - [N, 3] interpreted as [Ex, Ey, Ez] with V=0
-                # - [N, 4] interpreted as [V, Ex, Ey, Ez]
-                if _pef.shape[-1] == 3:
-                    pef_4col = torch.cat(
-                        [
-                            torch.zeros(
-                                _pef.shape[0], 1, dtype=_pef.dtype, device=_pef.device
-                            ),
-                            _pef,
-                        ],
-                        dim=-1,
-                    )
-                elif _pef.shape[-1] == 4:
-                    pef_4col = _pef
-                else:
-                    raise ValueError(
-                        "pointwise_external_field must have shape [N,3] or [N,4], "
-                        f"got {tuple(_pef.shape)}"
-                    )
-                half_external_field = half_external_field + 0.5 * self.external_field_contribution(
-                    data["batch"], pos_rel, pef_4col, per_atom=True
-                )
+            if mm_field_feats is not None:
+                half_external_field = half_external_field + 0.5 * mm_field_feats
             field_feats_alpha = (
                 field_feats_alpha + half_external_field
             ) / self.field_feature_norms
@@ -960,29 +1055,11 @@ class PolarMACE(ScaleShiftMACE):
             pbc=data["pbc"].view(-1, 3),
             force_pbc_evaluator=use_pbc_evaluator,
         )
-        # Homogeneous field couples to total dipole (existing convention).
         total_energy = (
             total_energy
             + electro_energy
             + torch.sum(external_potential[:, 1:] * total_dipole, dim=-1)
         )
-        # === (new) Per-atom node-wise field couples to per-atom GTO dipole moments. ===
-        if _pef is not None and charge_density_mul_ir.shape[1] > 1:
-            # CS order: [l1z, l1x, l1y] → Cartesian [x, y, z] = indices [2, 3, 1]
-            mu_i = charge_density_mul_ir[:, [2, 3, 1]]
-            if _pef.shape[-1] == 4:
-                pef_vec = _pef[:, 1:]
-            elif _pef.shape[-1] == 3:
-                pef_vec = _pef
-            else:
-                raise ValueError(
-                    "pointwise_external_field must have shape [N,3] or [N,4], "
-                    f"got {tuple(_pef.shape)}"
-                )
-            pef_dip = scatter_sum(
-                (pef_vec * mu_i).sum(-1), data["batch"], dim=0, dim_size=num_graphs
-            )
-            total_energy = total_energy + pef_dip
 
         forces, virials, stress, hessian, edge_forces = get_outputs(
             energy=total_energy,
@@ -990,13 +1067,20 @@ class PolarMACE(ScaleShiftMACE):
             displacement=displacement,
             vectors=vectors,
             cell=cell,
-            training=training,
+            training=(training or mm_positions_for_grad is not None),
             compute_force=compute_force,
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
             compute_edge_forces=compute_edge_forces or compute_atomic_stresses,
         )
+        mm_forces: Optional[torch.Tensor] = None
+        if mm_positions_for_grad is not None and compute_force:
+            mm_forces = compute_forces(
+                energy=total_energy,
+                positions=mm_positions_for_grad,
+                training=(training or compute_hessian or compute_edge_forces),
+            )
 
         atomic_virials: Optional[torch.Tensor] = None
         atomic_stresses: Optional[torch.Tensor] = None
@@ -1017,6 +1101,7 @@ class PolarMACE(ScaleShiftMACE):
             "node_energy": node_e0.clone().double() + node_inter_es.clone().double(),
             "interaction_energy": inter_e,
             "forces": forces,
+            "mm_forces": mm_forces,
             "edge_forces": edge_forces,
             "virials": virials,
             "stress": stress,
