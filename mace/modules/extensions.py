@@ -625,22 +625,58 @@ class PolarMACE(ScaleShiftMACE):
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         mm_positions = _get_optional_data_tensor(data, "mm_positions")
         mm_charges = _get_optional_data_tensor(data, "mm_charges")
-        if mm_positions is None or mm_charges is None:
+        mm_multipoles = _get_optional_data_tensor(data, "mm_multipoles")
+        if mm_charges is not None and mm_multipoles is not None:
+            raise ValueError(
+                "mm_charges and mm_multipoles are mutually exclusive; "
+                "provide only one."
+            )
+        if mm_positions is None or (mm_charges is None and mm_multipoles is None):
             return None, None
 
         mm_positions = mm_positions.to(device=positions.device, dtype=positions.dtype)
-        mm_charges = mm_charges.to(device=positions.device, dtype=positions.dtype).reshape(-1)
-        if mm_positions.numel() == 0 or mm_charges.numel() == 0:
+        if mm_positions.numel() == 0:
             return None, None
         if mm_positions.dim() != 2 or mm_positions.shape[-1] != 3:
             raise ValueError(
                 f"mm_positions must have shape [N_mm, 3], got {tuple(mm_positions.shape)}"
             )
-        if mm_positions.shape[0] != mm_charges.shape[0]:
-            raise ValueError(
-                "mm_positions and mm_charges must have the same leading dimension, got "
-                f"{mm_positions.shape[0]} and {mm_charges.shape[0]}"
+
+        if mm_multipoles is not None:
+            if self.atomic_multipoles_max_l > 1:
+                raise ValueError(
+                    "mm_multipoles input currently supports atomic_multipoles_max_l <= 1 "
+                    f"(Cartesian layout); model has atomic_multipoles_max_l="
+                    f"{self.atomic_multipoles_max_l}."
+                )
+            mm_multipoles = mm_multipoles.to(
+                device=positions.device, dtype=positions.dtype
             )
+            if mm_multipoles.numel() == 0:
+                return None, None
+            if mm_multipoles.dim() != 2 or mm_multipoles.shape[-1] != source_dim:
+                raise ValueError(
+                    f"mm_multipoles must have shape [N_mm, {source_dim}], "
+                    f"got {tuple(mm_multipoles.shape)}"
+                )
+            if mm_positions.shape[0] != mm_multipoles.shape[0]:
+                raise ValueError(
+                    "mm_positions and mm_multipoles must have the same leading "
+                    f"dimension, got {mm_positions.shape[0]} and "
+                    f"{mm_multipoles.shape[0]}"
+                )
+        else:
+            mm_charges = mm_charges.to(
+                device=positions.device, dtype=positions.dtype
+            ).reshape(-1)
+            if mm_charges.numel() == 0:
+                return None, None
+            if mm_positions.shape[0] != mm_charges.shape[0]:
+                raise ValueError(
+                    "mm_positions and mm_charges must have the same leading "
+                    f"dimension, got {mm_positions.shape[0]} and "
+                    f"{mm_charges.shape[0]}"
+                )
 
         mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
         if mm_source_batch is None:
@@ -665,10 +701,20 @@ class PolarMACE(ScaleShiftMACE):
         need_grad_mm = compute_force or training or compute_hessian or compute_edge_forces
         if need_grad_mm:
             mm_positions = mm_positions.clone().requires_grad_(True)
-        source_feats_mm = torch.zeros(
-            (n_mm, source_dim), dtype=positions.dtype, device=positions.device
-        )
-        source_feats_mm[:, 0] = mm_charges
+        if mm_multipoles is not None:
+            source_feats_mm = mm_multipoles.clone()
+            # User-facing layout is Cartesian (x,y,z); permute the l=1 block
+            # to e3nn spherical-harmonic order (y,z,x) before the descriptor,
+            # matching the convention used for edge vectors.
+            if self.atomic_multipoles_max_l >= 1 and source_dim >= 4:
+                source_feats_mm[:, 1:4] = _permute_to_e3nn_convention(
+                    source_feats_mm[:, 1:4]
+                )
+        else:
+            source_feats_mm = torch.zeros(
+                (n_mm, source_dim), dtype=positions.dtype, device=positions.device
+            )
+            source_feats_mm[:, 0] = mm_charges
         if charges_to_mul_ir is not None:
             source_feats_mm = charges_to_mul_ir(source_feats_mm)
 
@@ -981,6 +1027,7 @@ class PolarMACE(ScaleShiftMACE):
             fukui_norm2 = torch.where(
                 fukui_norm2 == 0, torch.ones_like(fukui_norm2), fukui_norm2
             )
+            # -15.9900
             current_fukui_sources = current_fukui_sources / fukui_norm2
             pred_total_charges = scatter_sum(
                 src=spin_charge_density[:, :, 0].double(),
