@@ -142,6 +142,7 @@ class MACECalculator(Calculator):
                 "external_field": "external_field",
                 "mm_positions": "mm_positions",
                 "mm_charges": "mm_charges",
+                "mm_multipoles": "mm_multipoles",
                 "mm_source_batch": "mm_source_batch",
             }
         if arrays_keys is None:
