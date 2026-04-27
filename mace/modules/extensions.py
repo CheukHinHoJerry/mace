@@ -749,6 +749,146 @@ class PolarMACE(ScaleShiftMACE):
             mm_field_feats = field_from_mul_ir(mm_field_feats)
         return mm_field_feats, mm_positions
 
+    def _compute_mm_field_features_source_target(
+        self,
+        data: Dict[str, torch.Tensor],
+        positions: torch.Tensor,
+        source_dim: int,
+        charges_to_mul_ir: Optional[torch.nn.Module],
+        k_vectors: torch.Tensor,
+        kv_norms_squared: torch.Tensor,
+        k_vectors_batch: torch.Tensor,
+        k_vectors_0mask: torch.Tensor,
+        volume: torch.Tensor,
+        pbc: torch.Tensor,
+        use_pbc_evaluator: bool,
+        training: bool,
+        compute_force: bool,
+        compute_hessian: bool,
+        compute_edge_forces: bool,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Active path: MM→QM field features via the source-target descriptor API.
+
+        Equivalent to the legacy `_compute_mm_field_features` (kept above for
+        reference) but avoids the wasteful concat-and-slice over (MM ∪ QM).
+        Verified bit-equivalent on the QM rows in
+        `graph_electrostatics/tests/test_features_source_target.py`.
+        """
+        mm_positions = _get_optional_data_tensor(data, "mm_positions")
+        mm_charges = _get_optional_data_tensor(data, "mm_charges")
+        mm_multipoles = _get_optional_data_tensor(data, "mm_multipoles")
+        if mm_charges is not None and mm_multipoles is not None:
+            raise ValueError(
+                "mm_charges and mm_multipoles are mutually exclusive; "
+                "provide only one."
+            )
+        if mm_positions is None or (mm_charges is None and mm_multipoles is None):
+            return None, None
+
+        mm_positions = mm_positions.to(device=positions.device, dtype=positions.dtype)
+        if mm_positions.numel() == 0:
+            return None, None
+        if mm_positions.dim() != 2 or mm_positions.shape[-1] != 3:
+            raise ValueError(
+                f"mm_positions must have shape [N_mm, 3], got {tuple(mm_positions.shape)}"
+            )
+
+        if mm_multipoles is not None:
+            if self.atomic_multipoles_max_l > 1:
+                raise ValueError(
+                    "mm_multipoles input currently supports atomic_multipoles_max_l <= 1 "
+                    f"(Cartesian layout); model has atomic_multipoles_max_l="
+                    f"{self.atomic_multipoles_max_l}."
+                )
+            mm_multipoles = mm_multipoles.to(
+                device=positions.device, dtype=positions.dtype
+            )
+            if mm_multipoles.numel() == 0:
+                return None, None
+            if mm_multipoles.dim() != 2 or mm_multipoles.shape[-1] != source_dim:
+                raise ValueError(
+                    f"mm_multipoles must have shape [N_mm, {source_dim}], "
+                    f"got {tuple(mm_multipoles.shape)}"
+                )
+            if mm_positions.shape[0] != mm_multipoles.shape[0]:
+                raise ValueError(
+                    "mm_positions and mm_multipoles must have the same leading "
+                    f"dimension, got {mm_positions.shape[0]} and "
+                    f"{mm_multipoles.shape[0]}"
+                )
+        else:
+            mm_charges = mm_charges.to(
+                device=positions.device, dtype=positions.dtype
+            ).reshape(-1)
+            if mm_charges.numel() == 0:
+                return None, None
+            if mm_positions.shape[0] != mm_charges.shape[0]:
+                raise ValueError(
+                    "mm_positions and mm_charges must have the same leading "
+                    f"dimension, got {mm_positions.shape[0]} and "
+                    f"{mm_charges.shape[0]}"
+                )
+
+        mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
+        if mm_source_batch is None:
+            if int(pbc.shape[0]) != 1:
+                raise ValueError(
+                    "mm_source_batch is required when batching more than one graph."
+                )
+            mm_source_batch = torch.zeros(
+                mm_positions.shape[0], dtype=torch.long, device=positions.device
+            )
+        else:
+            mm_source_batch = (
+                mm_source_batch.to(device=positions.device, dtype=torch.long).reshape(-1)
+            )
+        if mm_source_batch.shape[0] != mm_positions.shape[0]:
+            raise ValueError(
+                "mm_source_batch must match mm_positions length, got "
+                f"{mm_source_batch.shape[0]} and {mm_positions.shape[0]}"
+            )
+
+        n_mm = mm_positions.shape[0]
+        need_grad_mm = compute_force or training or compute_hessian or compute_edge_forces
+        if need_grad_mm:
+            mm_positions = mm_positions.clone().requires_grad_(True)
+        if mm_multipoles is not None:
+            source_feats_mm = mm_multipoles.clone()
+            if self.atomic_multipoles_max_l >= 1 and source_dim >= 4:
+                source_feats_mm[:, 1:4] = _permute_to_e3nn_convention(
+                    source_feats_mm[:, 1:4]
+                )
+        else:
+            source_feats_mm = torch.zeros(
+                (n_mm, source_dim), dtype=positions.dtype, device=positions.device
+            )
+            source_feats_mm[:, 0] = mm_charges
+        if charges_to_mul_ir is not None:
+            source_feats_mm = charges_to_mul_ir(source_feats_mm)
+
+        mm_cache = self.electric_potential_descriptor.precompute_geometry_source_target(
+            k_vectors=k_vectors,
+            k_norm2=kv_norms_squared,
+            k_vector_batch=k_vectors_batch,
+            k0_mask=k_vectors_0mask,
+            src_positions=mm_positions,
+            src_batch=mm_source_batch,
+            tgt_positions=positions,
+            tgt_batch=data["batch"],
+            volume=volume,
+            pbc=pbc,
+            force_pbc_evaluator=use_pbc_evaluator,
+        )
+        mm_field_feats = self.electric_potential_descriptor.forward_source_target(
+            cache=mm_cache,
+            source_feats=source_feats_mm.unsqueeze(-2),
+            pbc=pbc,
+        )
+        field_from_mul_ir = getattr(self, "_field_from_mul_ir", None)
+        if field_from_mul_ir is not None:
+            mm_field_feats = field_from_mul_ir(mm_field_feats)
+        return mm_field_feats, mm_positions
+
     def forward(
         self,
         data: Dict[str, torch.Tensor],
@@ -888,7 +1028,7 @@ class PolarMACE(ScaleShiftMACE):
             pbc=data["pbc"].view(-1, 3),
             force_pbc_evaluator=use_pbc_evaluator,
         )
-        mm_field_feats, mm_positions_for_grad = self._compute_mm_field_features(
+        mm_field_feats, mm_positions_for_grad = self._compute_mm_field_features_source_target(
             data=data,
             positions=positions,
             source_dim=spin_charge_density.shape[-1] // 2,
@@ -1011,8 +1151,7 @@ class PolarMACE(ScaleShiftMACE):
 
             current_fukui_sources = charge_sources_out[:, -2:]
             charge_sources = charge_sources_out[:, :-2]
-            # print("charge_sources", charge_sources)
-            # print("current_fukui_sources", current_fukui_sources)
+
             spin_charge_density_sources = charge_sources.view(
                 spin_charge_density.shape[0], 2, -1
             )
@@ -1027,7 +1166,7 @@ class PolarMACE(ScaleShiftMACE):
             fukui_norm2 = torch.where(
                 fukui_norm2 == 0, torch.ones_like(fukui_norm2), fukui_norm2
             )
-            # -15.9900
+
             current_fukui_sources = current_fukui_sources / fukui_norm2
             pred_total_charges = scatter_sum(
                 src=spin_charge_density[:, :, 0].double(),
