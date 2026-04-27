@@ -338,6 +338,7 @@ class PolarMACE(ScaleShiftMACE):
         field_norm_factor: Optional[float] = 0.02,
         fixedpoint_update_config: Optional[Dict[str, Any]] = None,
         field_readout_config: Optional[Dict[str, Any]] = None,
+        mm_field_route: str = "source_target",
         **kwargs,
     ):
         if not GRAPH_LONGRANGE_AVAILABLE:
@@ -403,6 +404,7 @@ class PolarMACE(ScaleShiftMACE):
         self.quadrupole_feature_corrections = quadrupole_feature_corrections
         self.field_si = field_si
         self.keep_last_layer_irreps = True
+        self.set_mm_field_route(mm_field_route)
 
         # k-space cutoff heuristic
         kspace_cutoff = kspace_cutoff_factor * gto_basis_kspace_cutoff(
@@ -604,6 +606,25 @@ class PolarMACE(ScaleShiftMACE):
             num_interactions=num_interactions,
             cueq_config=cueq_config,
         )
+
+    _MM_FIELD_ROUTES = ("source_target", "legacy_concat")
+
+    def set_mm_field_route(self, route: str) -> None:
+        """Select which MM->QM electrostatic-field implementation to use.
+
+        - "source_target" (default): MM atoms are sources, QM atoms are receivers
+          on the descriptor. Faster and lower-memory at large N_mm.
+        - "legacy_concat": treat MM ∪ QM as a single node set with QM source
+          coefficients zeroed, then slice the QM tail off the projection.
+          Retained for A/B benchmarking and equivalence tests.
+
+        Equivalent to round-off in float64; selectable to allow comparison.
+        """
+        if route not in self._MM_FIELD_ROUTES:
+            raise ValueError(
+                f"mm_field_route must be one of {self._MM_FIELD_ROUTES}, got {route!r}"
+            )
+        self.mm_field_route = route
 
     def _compute_mm_field_features(
         self,
@@ -1028,7 +1049,12 @@ class PolarMACE(ScaleShiftMACE):
             pbc=data["pbc"].view(-1, 3),
             force_pbc_evaluator=use_pbc_evaluator,
         )
-        mm_field_feats, mm_positions_for_grad = self._compute_mm_field_features_source_target(
+        mm_field_impl = (
+            self._compute_mm_field_features_source_target
+            if getattr(self, "mm_field_route", "source_target") == "source_target"
+            else self._compute_mm_field_features
+        )
+        mm_field_feats, mm_positions_for_grad = mm_field_impl(
             data=data,
             positions=positions,
             source_dim=spin_charge_density.shape[-1] // 2,
