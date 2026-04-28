@@ -10,7 +10,7 @@ import logging
 import os
 from glob import glob
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
@@ -92,6 +92,7 @@ class MACECalculator(Calculator):
         fullgraph=True,
         enable_cueq=False,
         enable_oeq=False,
+        mm_field_route: Optional[str] = None,
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
@@ -255,6 +256,13 @@ class MACECalculator(Calculator):
         # Ensure all models are on the same device
         for model in self.models:
             model.to(device)
+
+        # Optional override of the MM->QM electrostatic-field implementation.
+        # Only meaningful for PolarMACE; silently ignored for other model types.
+        if mm_field_route is not None:
+            for model in self.models:
+                if hasattr(model, "set_mm_field_route"):
+                    model.set_mm_field_route(mm_field_route)
 
         if has_ipex and device == "xpu":
             for model in self.models:
