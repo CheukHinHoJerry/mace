@@ -345,6 +345,9 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         config["include_electrostatic_self_interaction"] = (
             model.include_electrostatic_self_interaction
         )
+        config["include_dipole_mm_interaction"] = (
+            model.include_dipole_mm_interaction
+        )
         config["add_local_electron_energy"] = model.add_local_electron_energy
         config["quadrupole_feature_corrections"] = model.quadrupole_feature_corrections
         config["return_electrostatic_potentials"] = (

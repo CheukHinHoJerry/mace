@@ -400,6 +400,7 @@ class MACECalculator(Calculator):
                     "interaction_energy": [],
                     "electrostatic_energy": [],
                     "ml_mm_electrostatic_energy": [],
+                    "ml_mm_dipole_energy": [],
                     "electron_energy": [],
                     "spins": [num_atoms],
                     "density_coefficients": [num_atoms, self.density_dim],
@@ -545,6 +546,11 @@ class MACECalculator(Calculator):
                     (
                         "ml_mm_electrostatic_energy",
                         "ml_mm_electrostatic_energy",
+                        self.energy_units_to_eV,
+                    ),
+                    (
+                        "ml_mm_dipole_energy",
+                        "ml_mm_dipole_energy",
                         self.energy_units_to_eV,
                     ),
                     ("electron_energy", "electron_energy", self.energy_units_to_eV),

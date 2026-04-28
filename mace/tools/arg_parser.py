@@ -351,6 +351,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--include_dipole_mm_interaction",
+        help="include explicit ML dipole-MM charge interaction in PolarMACE",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
         "--add_local_electron_energy",
         help="add local electron energy correction in PolarMACE",
         type=str2bool,

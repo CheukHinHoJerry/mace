@@ -331,6 +331,7 @@ class PolarMACE(ScaleShiftMACE):
         num_recursion_steps: int = 1,
         field_si: bool = False,
         include_electrostatic_self_interaction: bool = False,
+        include_dipole_mm_interaction: bool = False,
         add_local_electron_energy: bool = False,
         quadrupole_feature_corrections: bool = False,
         return_electrostatic_potentials: bool = False,
@@ -399,6 +400,7 @@ class PolarMACE(ScaleShiftMACE):
         self.include_electrostatic_self_interaction = (
             include_electrostatic_self_interaction
         )
+        self.include_dipole_mm_interaction = include_dipole_mm_interaction
         self.atomic_multipoles_smearing_width = float(atomic_multipoles_smearing_width)
         self.add_local_electron_energy = add_local_electron_energy
         self.quadrupole_feature_corrections = quadrupole_feature_corrections
@@ -914,24 +916,27 @@ class PolarMACE(ScaleShiftMACE):
     def _ml_mm_coulomb(
         self,
         ml_charges: torch.Tensor,
+        ml_dipoles: Optional[torch.Tensor],
         ml_positions: torch.Tensor,
         ml_batch: torch.Tensor,
         mm_charges: Optional[torch.Tensor],
         mm_positions: Optional[torch.Tensor],
         mm_batch: Optional[torch.Tensor],
         num_graphs: int,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if mm_positions is None or mm_charges is None:
-            return torch.zeros(
+            zeros = torch.zeros(
                 num_graphs,
                 device=ml_positions.device,
                 dtype=ml_positions.dtype,
             )
+            return zeros, zeros
 
         mm_positions = mm_positions.to(device=ml_positions.device, dtype=ml_positions.dtype)
         mm_charges = mm_charges.to(device=ml_positions.device, dtype=ml_positions.dtype).reshape(-1)
         if mm_positions.numel() == 0 or mm_charges.numel() == 0:
-            return torch.zeros(num_graphs, device=ml_positions.device, dtype=ml_positions.dtype)
+            zeros = torch.zeros(num_graphs, device=ml_positions.device, dtype=ml_positions.dtype)
+            return zeros, zeros
         if mm_batch is None:
             mm_batch = torch.zeros(
                 mm_positions.shape[0], dtype=torch.long, device=ml_positions.device
@@ -952,14 +957,35 @@ class PolarMACE(ScaleShiftMACE):
         # same graph mask
         same = ml_batch[:, None] == mm_batch[None, :]
 
-        e_pair = k_e * qi * qj / r
-        e_pair = torch.where(same, e_pair, 0.0)
+        monopole_pair = k_e * qi * qj / r
+        monopole_pair = torch.where(same, monopole_pair, 0.0)
 
         # sum per graph
-        e_ml = e_pair.sum(dim=1)
-        e_graph = scatter_sum(e_ml, ml_batch, dim=0, dim_size=num_graphs)
+        monopole_graph = scatter_sum(
+            monopole_pair.sum(dim=1), ml_batch, dim=0, dim_size=num_graphs
+        )
 
-        return e_graph
+        dipole_graph = torch.zeros_like(monopole_graph)
+        if self.include_dipole_mm_interaction and ml_dipoles is not None:
+            # Add the explicit permanent ML(l=1)-MM(l=0) term on top of the
+            # existing ML(l=0)-MM(l=0) Coulomb piece. SCF response is still
+            # mediated only by the MM field descriptor and is left unchanged.
+            dipole_dot_r = torch.einsum("ik,ijk->ij", ml_dipoles, rij)
+            dipole_pair = -k_e * dipole_dot_r * qj / (r * r * r)
+            dipole_pair = torch.where(same, dipole_pair, 0.0)
+            dipole_graph = scatter_sum(
+                dipole_pair.sum(dim=1), ml_batch, dim=0, dim_size=num_graphs
+            )
+
+        return monopole_graph + dipole_graph, dipole_graph
+
+    def _extract_ml_dipoles(
+        self, charge_density_mul_ir: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """Return ML l=1 coefficients in mul_ir order if the model carries them."""
+        if self.atomic_multipoles_max_l < 1 or charge_density_mul_ir.shape[-1] < 4:
+            return None
+        return charge_density_mul_ir[:, 1:4]
 
     def forward(
         self,
@@ -1324,8 +1350,14 @@ class PolarMACE(ScaleShiftMACE):
         mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
         if not (mm_positions is None or mm_charges is None):
             ml_charges = charge_density_mul_ir[:, 0]
-            ml_mm_electrostatic_energy = self._ml_mm_coulomb(
+            ml_dipoles = (
+                self._extract_ml_dipoles(charge_density_mul_ir)
+                if self.include_dipole_mm_interaction
+                else None
+            )
+            ml_mm_electrostatic_energy, ml_mm_dipole_energy = self._ml_mm_coulomb(
                 ml_charges,
+                ml_dipoles,
                 positions,
                 data["batch"],
                 mm_charges,
@@ -1335,6 +1367,7 @@ class PolarMACE(ScaleShiftMACE):
             )
         else:
             ml_mm_electrostatic_energy = torch.zeros_like(electro_energy)
+            ml_mm_dipole_energy = torch.zeros_like(electro_energy)
         total_energy = (
             total_energy
             + electro_energy
@@ -1404,6 +1437,7 @@ class PolarMACE(ScaleShiftMACE):
             "total_charge": total_charge,
             "electrostatic_energy": electro_energy,
             "ml_mm_electrostatic_energy": ml_mm_electrostatic_energy,
+            "ml_mm_dipole_energy": ml_mm_dipole_energy,
             "electron_energy": le_total,
             "electrostatic_potentials": esps,
             "spin_charge_density": spin_charge_density_mul_ir,
