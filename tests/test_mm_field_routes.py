@@ -26,7 +26,7 @@ from mace.modules import interaction_classes
 from mace.modules.extensions import PolarMACE
 
 
-def _build_minimal_model(device, dtype, *, include_dipole_mm_interaction=False):
+def _build_minimal_model(device, dtype):
     """A tiny PolarMACE matching the one in test_polar_models.py.
 
     Inlined here (not imported) so this file is self-contained and pytest
@@ -75,7 +75,6 @@ def _build_minimal_model(device, dtype, *, include_dipole_mm_interaction=False):
         num_recursion_steps=1,
         field_si=False,
         include_electrostatic_self_interaction=False,
-        include_dipole_mm_interaction=include_dipole_mm_interaction,
         add_local_electron_energy=True,
         field_dependence_type="AgnosticEmbeddedOneBodyVariableUpdate",
         final_field_readout_type="OneBodyMLPFieldReadout",
@@ -272,7 +271,9 @@ def test_ml_mm_electrostatic_energy_matches_direct_pair_sum():
     model = _build_minimal_model(device, torch.float64)
     data = _build_mm_batch(device, torch.float64)
     out = _run_route(model, data, "source_target")
-    expected = _direct_ml_mm_coulomb(out["charges"], data)
+    expected = _direct_ml_mm_coulomb(out["charges"], data) + _direct_ml_mm_dipole_energy(
+        out["density_coefficients"], data
+    )
     torch.testing.assert_close(
         out["ml_mm_electrostatic_energy"], expected, atol=1e-9, rtol=1e-9
     )
@@ -280,9 +281,7 @@ def test_ml_mm_electrostatic_energy_matches_direct_pair_sum():
 
 def test_ml_mm_dipole_energy_matches_direct_pair_sum():
     device = torch.device("cpu")
-    model = _build_minimal_model(
-        device, torch.float64, include_dipole_mm_interaction=True
-    )
+    model = _build_minimal_model(device, torch.float64)
     data = _build_mm_batch(device, torch.float64)
     out = _run_route(model, data, "source_target")
     expected_dipole = _direct_ml_mm_dipole_energy(out["density_coefficients"], data)

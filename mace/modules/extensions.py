@@ -331,7 +331,6 @@ class PolarMACE(ScaleShiftMACE):
         num_recursion_steps: int = 1,
         field_si: bool = False,
         include_electrostatic_self_interaction: bool = False,
-        include_dipole_mm_interaction: bool = False,
         add_local_electron_energy: bool = False,
         quadrupole_feature_corrections: bool = False,
         return_electrostatic_potentials: bool = False,
@@ -400,7 +399,6 @@ class PolarMACE(ScaleShiftMACE):
         self.include_electrostatic_self_interaction = (
             include_electrostatic_self_interaction
         )
-        self.include_dipole_mm_interaction = include_dipole_mm_interaction
         self.atomic_multipoles_smearing_width = float(atomic_multipoles_smearing_width)
         self.add_local_electron_energy = add_local_electron_energy
         self.quadrupole_feature_corrections = quadrupole_feature_corrections
@@ -966,7 +964,7 @@ class PolarMACE(ScaleShiftMACE):
         )
 
         dipole_graph = torch.zeros_like(monopole_graph)
-        if self.include_dipole_mm_interaction and ml_dipoles is not None:
+        if ml_dipoles is not None:
             # Add the explicit permanent ML(l=1)-MM(l=0) term on top of the
             # existing ML(l=0)-MM(l=0) Coulomb piece. SCF response is still
             # mediated only by the MM field descriptor and is left unchanged.
@@ -1350,11 +1348,7 @@ class PolarMACE(ScaleShiftMACE):
         mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
         if not (mm_positions is None or mm_charges is None):
             ml_charges = charge_density_mul_ir[:, 0]
-            ml_dipoles = (
-                self._extract_ml_dipoles(charge_density_mul_ir)
-                if self.include_dipole_mm_interaction
-                else None
-            )
+            ml_dipoles = self._extract_ml_dipoles(charge_density_mul_ir)
             ml_mm_electrostatic_energy, ml_mm_dipole_energy = self._ml_mm_coulomb(
                 ml_charges,
                 ml_dipoles,

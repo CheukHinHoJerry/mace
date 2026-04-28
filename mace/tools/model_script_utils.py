@@ -317,7 +317,6 @@ def _build_model(
             num_recursion_steps=args.num_recursion_steps,
             field_si=args.field_si,
             include_electrostatic_self_interaction=args.include_electrostatic_self_interaction,
-            include_dipole_mm_interaction=args.include_dipole_mm_interaction,
             add_local_electron_energy=args.add_local_electron_energy,
             quadrupole_feature_corrections=args.quadrupole_feature_corrections,
             return_electrostatic_potentials=args.return_electrostatic_potentials,
