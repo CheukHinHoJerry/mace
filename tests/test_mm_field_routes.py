@@ -154,16 +154,20 @@ def _run_route(model, data, route: str) -> dict:
     energy = out["energy"].detach().clone()
     forces = out["forces"].detach().clone()
     ml_mm_electrostatic_energy = out["ml_mm_electrostatic_energy"].detach().clone()
+    ml_mm_dipole_energy = out["ml_mm_dipole_energy"].detach().clone()
     mm_forces = out["mm_forces"]
     assert mm_forces is not None, "expected mm_forces in output when MM input present"
     mm_forces = mm_forces.detach().clone()
     charges = out["charges"].detach().clone()
+    density_coefficients = out["density_coefficients"].detach().clone()
     return {
         "energy": energy,
         "forces": forces,
         "mm_forces": mm_forces,
         "ml_mm_electrostatic_energy": ml_mm_electrostatic_energy,
+        "ml_mm_dipole_energy": ml_mm_dipole_energy,
         "charges": charges,
+        "density_coefficients": density_coefficients,
     }
 
 
@@ -178,6 +182,26 @@ def _direct_ml_mm_coulomb(charges, data) -> torch.Tensor:
     rij = positions[:, None, :] - mm_positions[None, :, :]
     r = torch.linalg.norm(rij, dim=-1).clamp_min(1e-6)
     e_pair = k_e * charges[:, None] * mm_charges[None, :] / r
+    e_pair = torch.where(batch[:, None] == mm_batch[None, :], e_pair, 0.0)
+    e_atom = e_pair.sum(dim=1)
+    return torch.zeros(
+        int(batch.max().item()) + 1, dtype=positions.dtype, device=positions.device
+    ).scatter_add_(0, batch, e_atom)
+
+
+def _direct_ml_mm_dipole_energy(density_coefficients, data) -> torch.Tensor:
+    k_e = 14.3996454784255
+    positions = data["positions"]
+    mm_positions = data["mm_positions"]
+    mm_charges = data["mm_charges"]
+    batch = data["batch"]
+    mm_batch = data["mm_source_batch"]
+    dipoles = density_coefficients[:, 1:4]
+
+    rij = positions[:, None, :] - mm_positions[None, :, :]
+    r = torch.linalg.norm(rij, dim=-1).clamp_min(1e-6)
+    dipole_dot_r = torch.einsum("ik,ijk->ij", dipoles, rij)
+    e_pair = -k_e * dipole_dot_r * mm_charges[None, :] / (r * r * r)
     e_pair = torch.where(batch[:, None] == mm_batch[None, :], e_pair, 0.0)
     e_atom = e_pair.sum(dim=1)
     return torch.zeros(
@@ -247,7 +271,25 @@ def test_ml_mm_electrostatic_energy_matches_direct_pair_sum():
     model = _build_minimal_model(device, torch.float64)
     data = _build_mm_batch(device, torch.float64)
     out = _run_route(model, data, "source_target")
-    expected = _direct_ml_mm_coulomb(out["charges"], data)
+    expected = _direct_ml_mm_coulomb(out["charges"], data) + _direct_ml_mm_dipole_energy(
+        out["density_coefficients"], data
+    )
     torch.testing.assert_close(
         out["ml_mm_electrostatic_energy"], expected, atol=1e-9, rtol=1e-9
+    )
+
+
+def test_ml_mm_dipole_energy_matches_direct_pair_sum():
+    device = torch.device("cpu")
+    model = _build_minimal_model(device, torch.float64)
+    data = _build_mm_batch(device, torch.float64)
+    out = _run_route(model, data, "source_target")
+    expected_dipole = _direct_ml_mm_dipole_energy(out["density_coefficients"], data)
+    expected_total = _direct_ml_mm_coulomb(out["charges"], data) + expected_dipole
+    assert out["ml_mm_dipole_energy"].abs().max().item() > 1e-12
+    torch.testing.assert_close(
+        out["ml_mm_dipole_energy"], expected_dipole, atol=1e-9, rtol=1e-9
+    )
+    torch.testing.assert_close(
+        out["ml_mm_electrostatic_energy"], expected_total, atol=1e-9, rtol=1e-9
     )
