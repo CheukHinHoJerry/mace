@@ -795,6 +795,7 @@ class PolarMACE(ScaleShiftMACE):
         Verified bit-equivalent on the QM rows in
         `graph_electrostatics/tests/test_features_source_target.py`.
         """
+
         mm_positions = _get_optional_data_tensor(data, "mm_positions")
         mm_charges = _get_optional_data_tensor(data, "mm_charges")
         mm_multipoles = _get_optional_data_tensor(data, "mm_multipoles")
@@ -909,6 +910,56 @@ class PolarMACE(ScaleShiftMACE):
         if field_from_mul_ir is not None:
             mm_field_feats = field_from_mul_ir(mm_field_feats)
         return mm_field_feats, mm_positions
+
+    def _ml_mm_coulomb(
+        self,
+        ml_charges: torch.Tensor,
+        ml_positions: torch.Tensor,
+        ml_batch: torch.Tensor,
+        mm_charges: Optional[torch.Tensor],
+        mm_positions: Optional[torch.Tensor],
+        mm_batch: Optional[torch.Tensor],
+        num_graphs: int,
+    ):
+        if mm_positions is None or mm_charges is None:
+            return torch.zeros(
+                num_graphs,
+                device=ml_positions.device,
+                dtype=ml_positions.dtype,
+            )
+
+        mm_positions = mm_positions.to(device=ml_positions.device, dtype=ml_positions.dtype)
+        mm_charges = mm_charges.to(device=ml_positions.device, dtype=ml_positions.dtype).reshape(-1)
+        if mm_positions.numel() == 0 or mm_charges.numel() == 0:
+            return torch.zeros(num_graphs, device=ml_positions.device, dtype=ml_positions.dtype)
+        if mm_batch is None:
+            mm_batch = torch.zeros(
+                mm_positions.shape[0], dtype=torch.long, device=ml_positions.device
+            )
+        else:
+            mm_batch = mm_batch.to(device=ml_positions.device, dtype=torch.long).reshape(-1)
+
+        # Coulomb prefactor (eV·Å)
+        k_e = 14.3996454784255
+
+        # pairwise distances
+        rij = ml_positions[:, None, :] - mm_positions[None, :, :]
+        r = torch.linalg.norm(rij, dim=-1).clamp_min(1e-6)
+
+        qi = ml_charges[:, None]
+        qj = mm_charges[None, :]
+
+        # same graph mask
+        same = ml_batch[:, None] == mm_batch[None, :]
+
+        e_pair = k_e * qi * qj / r
+        e_pair = torch.where(same, e_pair, 0.0)
+
+        # sum per graph
+        e_ml = e_pair.sum(dim=1)
+        e_graph = scatter_sum(e_ml, ml_batch, dim=0, dim_size=num_graphs)
+
+        return e_graph
 
     def forward(
         self,
@@ -1267,9 +1318,27 @@ class PolarMACE(ScaleShiftMACE):
             pbc=data["pbc"].view(-1, 3),
             force_pbc_evaluator=use_pbc_evaluator,
         )
+
+        mm_positions = _get_optional_data_tensor(data, "mm_positions")
+        mm_charges = _get_optional_data_tensor(data, "mm_charges")
+        mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
+        if not (mm_positions is None or mm_charges is None):
+            ml_charges = charge_density_mul_ir[:, 0]
+            ml_mm_electrostatic_energy = self._ml_mm_coulomb(
+                ml_charges,
+                positions,
+                data["batch"],
+                mm_charges,
+                mm_positions_for_grad,
+                mm_source_batch,
+                num_graphs,
+            )
+        else:
+            ml_mm_electrostatic_energy = torch.zeros_like(electro_energy)
         total_energy = (
             total_energy
             + electro_energy
+            + ml_mm_electrostatic_energy
             + torch.sum(external_potential[:, 1:] * total_dipole, dim=-1)
         )
 
@@ -1334,6 +1403,7 @@ class PolarMACE(ScaleShiftMACE):
             "dipole": total_dipole,
             "total_charge": total_charge,
             "electrostatic_energy": electro_energy,
+            "ml_mm_electrostatic_energy": ml_mm_electrostatic_energy,
             "electron_energy": le_total,
             "electrostatic_potentials": esps,
             "spin_charge_density": spin_charge_density_mul_ir,
