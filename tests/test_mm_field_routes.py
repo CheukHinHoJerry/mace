@@ -153,10 +153,36 @@ def _run_route(model, data, route: str) -> dict:
     out = model(data, training=False, compute_force=True)
     energy = out["energy"].detach().clone()
     forces = out["forces"].detach().clone()
+    ml_mm_electrostatic_energy = out["ml_mm_electrostatic_energy"].detach().clone()
     mm_forces = out["mm_forces"]
     assert mm_forces is not None, "expected mm_forces in output when MM input present"
     mm_forces = mm_forces.detach().clone()
-    return {"energy": energy, "forces": forces, "mm_forces": mm_forces}
+    charges = out["charges"].detach().clone()
+    return {
+        "energy": energy,
+        "forces": forces,
+        "mm_forces": mm_forces,
+        "ml_mm_electrostatic_energy": ml_mm_electrostatic_energy,
+        "charges": charges,
+    }
+
+
+def _direct_ml_mm_coulomb(charges, data) -> torch.Tensor:
+    k_e = 14.3996454784255
+    positions = data["positions"]
+    mm_positions = data["mm_positions"]
+    mm_charges = data["mm_charges"]
+    batch = data["batch"]
+    mm_batch = data["mm_source_batch"]
+
+    rij = positions[:, None, :] - mm_positions[None, :, :]
+    r = torch.linalg.norm(rij, dim=-1).clamp_min(1e-6)
+    e_pair = k_e * charges[:, None] * mm_charges[None, :] / r
+    e_pair = torch.where(batch[:, None] == mm_batch[None, :], e_pair, 0.0)
+    e_atom = e_pair.sum(dim=1)
+    return torch.zeros(
+        int(batch.max().item()) + 1, dtype=positions.dtype, device=positions.device
+    ).scatter_add_(0, batch, e_atom)
 
 
 def test_default_route_is_source_target():
@@ -197,6 +223,12 @@ def test_mm_field_routes_energy_force_equivalence(dtype, atol):
     torch.testing.assert_close(
         out_st["mm_forces"], out_lg["mm_forces"], atol=atol, rtol=atol
     )
+    torch.testing.assert_close(
+        out_st["ml_mm_electrostatic_energy"],
+        out_lg["ml_mm_electrostatic_energy"],
+        atol=atol,
+        rtol=atol,
+    )
 
 
 def test_mm_forces_nontrivial_so_test_is_meaningful():
@@ -208,3 +240,14 @@ def test_mm_forces_nontrivial_so_test_is_meaningful():
     data = _build_mm_batch(device, torch.float64)
     out = _run_route(model, data, "source_target")
     assert out["mm_forces"].abs().max().item() > 1e-12
+
+
+def test_ml_mm_electrostatic_energy_matches_direct_pair_sum():
+    device = torch.device("cpu")
+    model = _build_minimal_model(device, torch.float64)
+    data = _build_mm_batch(device, torch.float64)
+    out = _run_route(model, data, "source_target")
+    expected = _direct_ml_mm_coulomb(out["charges"], data)
+    torch.testing.assert_close(
+        out["ml_mm_electrostatic_energy"], expected, atol=1e-9, rtol=1e-9
+    )
