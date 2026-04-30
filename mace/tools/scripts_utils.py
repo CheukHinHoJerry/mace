@@ -837,15 +837,6 @@ def get_params_options(
             },
         ]
 
-    if model.__class__.__name__ == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE" \
-        and args.train_one_body_contribution:
-            params_list.append({
-                "name": "magmom_exp_scaling_and_onebody_basis",
-                "params": [model.one_body_magmom_exp_scaling] + 
-                          list(model.onebody_magmombasis_list.parameters()),
-                "weight_decay": 0.0,
-            })
-
     if model.__class__.__name__ == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE" \
         and args.train_one_body_contribution:
             params_list.append({
