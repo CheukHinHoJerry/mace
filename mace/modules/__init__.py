@@ -1,6 +1,10 @@
+import logging
 from typing import Callable, Dict, Optional, Type
 
 import torch
+
+logging.getLogger("cuequivariance_torch.primitives.tensor_product").setLevel(logging.WARNING)
+logging.getLogger("cuequivariance_torch.primitives.symmetric_tensor_product").setLevel(logging.WARNING)
 
 from .blocks import (
     AgnosticNonlinearInteractionBlock,

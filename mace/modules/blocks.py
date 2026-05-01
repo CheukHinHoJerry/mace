@@ -311,7 +311,6 @@ class EquivariantProductBasisBlock(torch.nn.Module):
                 irreps_out=target_irreps,
                 correlation=correlation,
                 num_elements=num_elements,
-                cueq_config=cueq_config,
             )
         else:
             raise ValueError("Contraction class not supported")
@@ -323,7 +322,7 @@ class EquivariantProductBasisBlock(torch.nn.Module):
             shared_weights=True,
             cueq_config=cueq_config,
         )
-        self.cueq_config = cueq_config
+        self.cueq_config = None if contraction_cls == "NonSOCSymmetricContraction" else cueq_config
 
     def forward(
         self,
@@ -341,7 +340,11 @@ class EquivariantProductBasisBlock(torch.nn.Module):
                     use_cueq = True
                 if self.cueq_config.layout_str == "mul_ir":
                     use_cueq_mul_ir = True
-        if use_cueq:
+        if self.contraction_cls == "NonSOCSymmetricContraction":
+            # Custom non-SOC contraction expects dense one-hot node_attrs and
+            # unflattened equivariant features.
+            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+        elif use_cueq:
             if use_cueq_mul_ir:
                 node_feats = torch.transpose(node_feats, 1, 2)
             index_attrs = torch.nonzero(node_attrs)[:, 1].int()
@@ -375,7 +378,7 @@ class EquivariantProductBasisNonSOCWithSelfMagmomBlock(torch.nn.Module):
         self.use_sc = use_sc
         self.magmom_node_inv_feats_irreps = magmom_node_inv_feats_irreps
         self.magmom_node_attrs_irreps = magmom_node_attrs_irreps
-        self.cueq_config = cueq_config
+        self.cueq_config = None if contraction_cls == "NonSOCSymmetricContraction" else cueq_config
         self.contraction_cls = contraction_cls
         
         if contraction_cls == "SymmetricContraction":
@@ -392,6 +395,7 @@ class EquivariantProductBasisNonSOCWithSelfMagmomBlock(torch.nn.Module):
                 irreps_out=target_irreps,
                 correlation=correlation,
                 num_elements=num_elements,
+                magmom_irreps=self.magmom_node_attrs_irreps,
                 # cueq_config=cueq_config,
             )
         else:
@@ -449,7 +453,11 @@ class EquivariantProductBasisNonSOCWithSelfMagmomBlock(torch.nn.Module):
                     use_cueq = True
                 if self.cueq_config.layout_str == "mul_ir":
                     use_cueq_mul_ir = True
-        if use_cueq:
+        if self.contraction_cls == "NonSOCSymmetricContraction":
+            # Non-SOC contraction is custom and expects dense one-hot attrs and
+            # unflattened equivariant node features.
+            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+        elif use_cueq:
             if use_cueq_mul_ir:
                 node_feats = torch.transpose(node_feats, 1, 2)
             index_attrs = torch.nonzero(node_attrs)[:, 1].int()
@@ -1223,7 +1231,7 @@ class RealAgnosticResidualInteractionBlock(InteractionBlock):
         )  # [n_nodes, channels, (lmax + 1)**2]
 
 
-@compile_mode("script")
+#@compile_mode("script")
 class RealAgnosticDensityInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         if not hasattr(self, "cueq_config"):
@@ -2532,7 +2540,6 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
         receiver = edge_index[1]
         num_edges = len(sender)
         num_k = self.conv_tp.irreps_out[0].mul
-        lmax_magmom = self.magmom_node_attrs_irreps.lmax
 
         num_nodes = node_feats.shape[0]
         node_feats = self.linear_up(node_feats)
@@ -2555,7 +2562,14 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
 
         
         tp_weights_magmom = self.conv_tp_weights_magmom(edge_feats_with_magmom)
-        tp_weights_magmom = tp_weights_magmom.reshape(num_edges, num_k, lmax_magmom+1)
+        if tp_weights_magmom.shape[1] % num_k != 0:
+            raise ValueError(
+                "magmom TP weight dimension must be divisible by num_k; "
+                f"got weight_dim={tp_weights_magmom.shape[1]} num_k={num_k}"
+            )
+        tp_weights_magmom = tp_weights_magmom.reshape(
+            num_edges, num_k, tp_weights_magmom.shape[1] // num_k
+        )
         # this is just CP decomposition
         tp_weights_magmom = tp_weights_magmom * pre_mji[:, :num_k].unsqueeze(-1)
         tp_weights_magmom = tp_weights_magmom.reshape(num_edges, tp_weights_magmom.shape[1] * tp_weights_magmom.shape[2])
@@ -2617,7 +2631,7 @@ class MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock(Magnet
             None
         )  # [n_nodes, channels, (lmax + 1)**2]
 
-@compile_mode("script")
+#@compile_mode("script")
 class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInteractionBlock):
     """
     Non-SOC interaction block that constructs A_{k k' l l' m m'} = sum_j φ_{k l m}(r_j) φ'_{k' l' m'}(m_j)
@@ -2650,7 +2664,7 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
             instructions=instr_r,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            cueq_config=None,
         )
 
         # --- 3. TensorProduct for magnetic-space (m) message ---
@@ -2666,7 +2680,7 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
             instructions=instr_m,
             shared_weights=False,
             internal_weights=False,
-            cueq_config=self.cueq_config,
+            cueq_config=None,
         )
 
         # --- 4. MLPs generating radial/magnetic weights ---
@@ -2732,9 +2746,17 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
 
 
 
-        # --- 7. Density normalization ---
+        # --- 7. Density normalization (mirrors SOC density handling) ---
         self.density_fn = nn.FullyConnectedNet(
-            [input_dim + magmom_input_dim] + [1],
+            [input_dim] + [1],
+            torch.nn.functional.silu,
+        )
+        self.density_fn_magmom = nn.FullyConnectedNet(
+            [magmom_input_dim] + [1],
+            torch.nn.functional.silu,
+        )
+        self.density_gate = nn.FullyConnectedNet(
+            [2, 1],
             torch.nn.functional.silu,
         )
 
@@ -2772,26 +2794,39 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
         tp_r_weights = self.conv_tp_r_weights(edge_feats_with_magmom)
         tp_m_weights = self.conv_tp_m_weights(edge_feats_with_magmom)
 
-        # --- density normalization term ---
-        edge_density = torch.tanh(self.density_fn(edge_feats_with_magmom) ** 2)
+        # --- density normalization terms (separate radial + magnetic channels) ---
+        edge_density = torch.tanh(self.density_fn(edge_feats) ** 2)
+        edge_density_magmom = torch.tanh(self.density_fn_magmom(magmom_inv_feats_j) ** 2)
 
         # --- compute positional and magnetic edge messages ---
         r_msg = self.conv_tp_r(node_feats[sender], edge_attrs, tp_r_weights)  # φ_{klm}(r_j)
         m_msg = self.conv_tp_m(node_feats[sender], magmom_node_attrs[sender], tp_m_weights)  # φ'_{k'l'm'}(m_j)
         
-        # import pdb; pdb.set_trace();
         r_msg = self.reshape_tp_r_mji(r_msg)
         m_msg = self.reshape_tp_m_mji(m_msg)
         # import pdb; pdb.set_trace();
-        # --- CP-type contraction: pointwise product over (k,k') ---
-        # both r_msg and m_msg: [n_edges, irreps_dim] (same per-edge shape)
-        A_msg = torch.einsum('bkl,bkp->bklp', r_msg, m_msg)  # elementwise CP product = A_{kk'll'mm'}(edge)
+        # --- CP-type contraction: pointwise product over channel index k ---
+        # Layout after reshape_irreps depends on cueq layout:
+        #   mul_ir (default/e3nn): r,m are [B, k, l] and [B, k, p]
+        #   ir_mul (cueq):         r,m are [B, l, k] and [B, p, k]
+        # We always construct A_msg as [B, k, l, p] for downstream code.
+        if (
+            hasattr(self, "cueq_config")
+            and self.cueq_config is not None
+            and getattr(self.cueq_config, "layout_str", "mul_ir") == "ir_mul"
+        ):
+            A_msg = torch.einsum("blk,bpk->bklp", r_msg, m_msg)
+        else:
+            A_msg = torch.einsum("bkl,bkp->bklp", r_msg, m_msg)
 
         # --- aggregate to nodes (sum over j) ---
         pooled_A = scatter_sum(src=A_msg, index=receiver, dim=0, dim_size=num_nodes)
 
-        # --- normalize by density ---
+        # --- normalize by density (SOC-style gated density mixing) ---
         density = scatter_sum(src=edge_density, index=receiver, dim=0, dim_size=num_nodes)
+        density_magmom = scatter_sum(src=edge_density_magmom, index=receiver, dim=0, dim_size=num_nodes)
+        gate = torch.sigmoid(self.density_gate(torch.cat([density, density_magmom], dim=-1)))
+        density = gate * density + (1.0 - gate) * density_magmom
         density = density + 1.0
 
         # --- linear and skip connections ---
@@ -3632,7 +3667,7 @@ class RealAgnosticAttResidualInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         if not hasattr(self, "cueq_config"):
             self.cueq_config = None
-        self.node_feats_down_irreps = o3.Irreps("64x0e")
+        self.node_feats_down_irreps = self.node_feats_irreps
         # First linear
         self.linear_up = Linear(
             self.node_feats_irreps,
