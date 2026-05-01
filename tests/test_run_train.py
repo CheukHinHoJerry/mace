@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import ase.io
 import numpy as np
@@ -11,6 +12,10 @@ import torch
 from ase.atoms import Atoms
 
 from mace.calculators import MACECalculator, mace_mp
+from mace.tools.multihead_tools import (
+    inherit_magnetic_hyperparameters_from_foundation,
+    prepare_custom_pt_head,
+)
 
 try:
     import cuequivariance as cue  # pylint: disable=unused-import
@@ -854,6 +859,81 @@ def test_run_train_multihead_replay_custum_finetuning(
     assert len(Es) == len(fitting_configs)
     assert all(isinstance(E, float) for E in Es)
     assert len(set(Es)) > 1  # Ens
+
+
+def test_run_train_foundation_multihead_custom_pt_e0s_override(
+    tmp_path, pretraining_configs
+):
+    torch.set_default_dtype(torch.float64)
+
+    ase.io.write(tmp_path / "pretrain.xyz", pretraining_configs)
+    args = SimpleNamespace(
+        work_dir=str(tmp_path),
+        seed=42,
+        valid_fraction=0.1,
+        energy_key="REF_energy",
+        forces_key="REF_forces",
+        stress_key="REF_stress",
+        virials_key="REF_virials",
+        dipole_key="REF_dipole",
+        charges_key="REF_charges",
+        magmom_key="REF_magmom",
+        magforces_key="REF_magforces",
+        pt_energy_key=None,
+        pt_forces_key=None,
+        pt_stress_key=None,
+        pt_virials_key=None,
+        pt_dipole_key=None,
+        pt_charges_key=None,
+        pt_magmom_key=None,
+        keep_isolated_atoms=True,
+        statistics_file=None,
+        pt_train_file=str(tmp_path / "pretrain.xyz"),
+        pt_valid_file=None,
+    )
+
+    head_config_pt = prepare_custom_pt_head(args, avg_num_neighbors=1.0)
+
+    assert head_config_pt.head_name == "pt_head"
+    assert head_config_pt.E0s == "foundation"
+    assert head_config_pt.atomic_energies_dict is not None
+    assert np.isclose(head_config_pt.atomic_energies_dict[1], -4.0)
+    assert np.isclose(head_config_pt.atomic_energies_dict[8], -2.0)
+
+
+def test_run_train_foundation_multihead_inherits_magnetic_hyperparameters(monkeypatch):
+    args = SimpleNamespace(
+        m_max=[1, 1, 1],
+        max_m_ell=1,
+        num_mag_radial_basis=1,
+        num_mag_radial_basis_one_body=1,
+    )
+    foundation_config = {
+        "m_max": torch.tensor([2, 3, 4], dtype=torch.int64),
+        "max_m_ell": 5,
+        "num_mag_radial_basis": 6,
+        "num_mag_radial_basis_one_body": 7,
+    }
+
+    monkeypatch.setattr(
+        "mace.tools.multihead_tools.extract_config_mace_model",
+        lambda model: foundation_config,
+    )
+
+    inherited = inherit_magnetic_hyperparameters_from_foundation(
+        args, object()
+    )
+
+    assert args.m_max == [2, 3, 4]
+    assert args.max_m_ell == 5
+    assert args.num_mag_radial_basis == 6
+    assert args.num_mag_radial_basis_one_body == 7
+    assert inherited == {
+        "m_max_len": 3,
+        "max_m_ell": 5,
+        "num_mag_radial_basis": 6,
+        "num_mag_radial_basis_one_body": 7,
+    }
 
 
 @pytest.mark.skipif(not CUET_AVAILABLE, reason="cuequivariance not installed")
