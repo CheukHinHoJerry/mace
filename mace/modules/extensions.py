@@ -921,6 +921,8 @@ class PolarMACE(ScaleShiftMACE):
         mm_positions: Optional[torch.Tensor],
         mm_batch: Optional[torch.Tensor],
         num_graphs: int,
+        cell: Optional[torch.Tensor] = None,
+        pbc: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if mm_positions is None or mm_charges is None:
             zeros = torch.zeros(
@@ -945,8 +947,15 @@ class PolarMACE(ScaleShiftMACE):
         # Coulomb prefactor (eV·Å)
         k_e = 14.3996454784255
 
-        # pairwise distances
-        rij = ml_positions[:, None, :] - mm_positions[None, :, :]
+        rij = self._ml_mm_displacements(
+            ml_positions=ml_positions,
+            ml_batch=ml_batch,
+            mm_positions=mm_positions,
+            mm_batch=mm_batch,
+            num_graphs=num_graphs,
+            cell=cell,
+            pbc=pbc,
+        )
         r = torch.linalg.norm(rij, dim=-1).clamp_min(1e-6)
 
         qi = ml_charges[:, None]
@@ -976,6 +985,59 @@ class PolarMACE(ScaleShiftMACE):
             )
 
         return monopole_graph + dipole_graph, dipole_graph
+
+    @staticmethod
+    def _ml_mm_displacements(
+        ml_positions: torch.Tensor,
+        ml_batch: torch.Tensor,
+        mm_positions: torch.Tensor,
+        mm_batch: torch.Tensor,
+        num_graphs: int,
+        cell: Optional[torch.Tensor],
+        pbc: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Return ML-MM displacement vectors, with minimum-image PBC if requested."""
+        rij = ml_positions[:, None, :] - mm_positions[None, :, :]
+        if cell is None or pbc is None or not torch.any(pbc):
+            return rij
+
+        cell_mats = cell.view(-1, 3, 3).to(device=ml_positions.device, dtype=ml_positions.dtype)
+        pbc_flags = pbc.view(-1, 3).to(device=ml_positions.device)
+        rij_pbc = rij.clone()
+        for graph_index in range(num_graphs):
+            periodic_dims = pbc_flags[graph_index]
+            if not torch.any(periodic_dims):
+                continue
+            ml_mask = ml_batch == graph_index
+            mm_mask = mm_batch == graph_index
+            if not torch.any(ml_mask) or not torch.any(mm_mask):
+                continue
+            disp = rij_pbc[ml_mask][:, mm_mask, :]
+            frac = torch.matmul(disp, torch.linalg.inv(cell_mats[graph_index]))
+            frac = frac.clone()
+            frac[..., periodic_dims] = frac[..., periodic_dims] - torch.round(
+                frac[..., periodic_dims]
+            )
+            rij_pbc[ml_mask[:, None] & mm_mask[None, :]] = torch.matmul(
+                frac, cell_mats[graph_index]
+            ).reshape(-1, 3)
+        return rij_pbc
+
+    @staticmethod
+    def _mm_charge_features(
+        mm_charges: torch.Tensor,
+        feature_dim: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Represent MM point charges as l=0-only electrostatic source features."""
+        mm_features = torch.zeros(
+            (mm_charges.numel(), feature_dim), dtype=dtype, device=device
+        )
+        if mm_features.numel() > 0:
+            mm_features[:, 0] = mm_charges.to(device=device, dtype=dtype).reshape(-1)
+        return mm_features
 
     def _extract_ml_dipoles(
         self, charge_density_mul_ir: torch.Tensor
@@ -1346,26 +1408,74 @@ class PolarMACE(ScaleShiftMACE):
         mm_positions = _get_optional_data_tensor(data, "mm_positions")
         mm_charges = _get_optional_data_tensor(data, "mm_charges")
         mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
+        mm_mm_electrostatic_energy = torch.zeros_like(electro_energy)
         if not (mm_positions is None or mm_charges is None):
-            ml_charges = charge_density_mul_ir[:, 0]
-            ml_dipoles = self._extract_ml_dipoles(charge_density_mul_ir)
-            ml_mm_electrostatic_energy, ml_mm_dipole_energy = self._ml_mm_coulomb(
-                ml_charges,
-                ml_dipoles,
-                positions,
-                data["batch"],
-                mm_charges,
-                mm_positions_for_grad,
-                mm_source_batch,
-                num_graphs,
-            )
+            if mm_source_batch is None:
+                mm_source_batch = torch.zeros(
+                    mm_charges.numel(), dtype=torch.long, device=positions.device
+                )
+            else:
+                mm_source_batch = mm_source_batch.to(device=positions.device, dtype=torch.long).reshape(-1)
+
+            if torch.any(data["pbc"].view(-1, 3)):
+                mm_features = self._mm_charge_features(
+                    mm_charges,
+                    charge_density_mul_ir.shape[-1],
+                    dtype=charge_density_mul_ir.dtype,
+                    device=charge_density_mul_ir.device,
+                )
+                mixed_features = torch.cat((charge_density_mul_ir, mm_features), dim=0)
+                mixed_positions = torch.cat((positions, mm_positions_for_grad), dim=0)
+                mixed_batch = torch.cat((data["batch"], mm_source_batch), dim=0)
+                mixed_electrostatic_energy = self.coulomb_energy(
+                    k_vectors=k_vectors,
+                    k_norm2=kv_norms_squared,
+                    k_vector_batch=k_vectors_batch,
+                    k0_mask=k_vectors_0mask,
+                    source_feats=mixed_features,
+                    node_positions=mixed_positions,
+                    batch=mixed_batch,
+                    volume=data["volume"],
+                    pbc=data["pbc"].view(-1, 3),
+                    force_pbc_evaluator=use_pbc_evaluator,
+                )
+                mm_mm_electrostatic_energy = self.coulomb_energy(
+                    k_vectors=k_vectors,
+                    k_norm2=kv_norms_squared,
+                    k_vector_batch=k_vectors_batch,
+                    k0_mask=k_vectors_0mask,
+                    source_feats=mm_features,
+                    node_positions=mm_positions_for_grad,
+                    batch=mm_source_batch,
+                    volume=data["volume"],
+                    pbc=data["pbc"].view(-1, 3),
+                    force_pbc_evaluator=use_pbc_evaluator,
+                )
+                electro_energy = mixed_electrostatic_energy - mm_mm_electrostatic_energy
+                ml_mm_electrostatic_energy = electro_energy
+                ml_mm_dipole_energy = torch.zeros_like(electro_energy)
+            else:
+                ml_charges = charge_density_mul_ir[:, 0]
+                ml_dipoles = self._extract_ml_dipoles(charge_density_mul_ir)
+                ml_mm_electrostatic_energy, ml_mm_dipole_energy = self._ml_mm_coulomb(
+                    ml_charges,
+                    ml_dipoles,
+                    positions,
+                    data["batch"],
+                    mm_charges,
+                    mm_positions_for_grad,
+                    mm_source_batch,
+                    num_graphs,
+                    cell=cell,
+                    pbc=data["pbc"].view(-1, 3),
+                )
+                electro_energy = electro_energy + ml_mm_electrostatic_energy
         else:
             ml_mm_electrostatic_energy = torch.zeros_like(electro_energy)
             ml_mm_dipole_energy = torch.zeros_like(electro_energy)
         total_energy = (
             total_energy
             + electro_energy
-            + ml_mm_electrostatic_energy
             + torch.sum(external_potential[:, 1:] * total_dipole, dim=-1)
         )
 
@@ -1432,6 +1542,7 @@ class PolarMACE(ScaleShiftMACE):
             "electrostatic_energy": electro_energy,
             "ml_mm_electrostatic_energy": ml_mm_electrostatic_energy,
             "ml_mm_dipole_energy": ml_mm_dipole_energy,
+            "mm_mm_electrostatic_energy": mm_mm_electrostatic_energy,
             "electron_energy": le_total,
             "electrostatic_potentials": esps,
             "spin_charge_density": spin_charge_density_mul_ir,
