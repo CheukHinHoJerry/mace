@@ -181,6 +181,7 @@ class MACECalculator(Calculator):
             )
             if model_type == "PolarMACE":
                 self.implemented_properties.append("ml_mm_electrostatic_energy")
+                self.implemented_properties.append("mm_mm_electrostatic_energy")
             if kwargs.get("compute_atomic_stresses", False):
                 self.implemented_properties.extend(["stresses", "virials"])
                 self.compute_atomic_stresses = True
@@ -401,6 +402,7 @@ class MACECalculator(Calculator):
                     "electrostatic_energy": [],
                     "ml_mm_electrostatic_energy": [],
                     "ml_mm_dipole_energy": [],
+                    "mm_mm_electrostatic_energy": [],
                     "electron_energy": [],
                     "spins": [num_atoms],
                     "density_coefficients": [num_atoms, self.density_dim],
@@ -551,6 +553,11 @@ class MACECalculator(Calculator):
                     (
                         "ml_mm_dipole_energy",
                         "ml_mm_dipole_energy",
+                        self.energy_units_to_eV,
+                    ),
+                    (
+                        "mm_mm_electrostatic_energy",
+                        "mm_mm_electrostatic_energy",
                         self.energy_units_to_eV,
                     ),
                     ("electron_energy", "electron_energy", self.energy_units_to_eV),

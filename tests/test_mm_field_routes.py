@@ -86,7 +86,7 @@ def _build_minimal_model(device, dtype):
     ).to(device=device, dtype=dtype)
 
 
-def _build_mm_batch(device, dtype, n_mm=8, seed=0):
+def _build_mm_batch(device, dtype, n_mm=8, seed=0, pbc=False):
     """A batched water-like 2-atom QM system + n_mm MM point charges.
 
     Layout matches the schema PolarMACE.forward expects: mm_positions,
@@ -114,6 +114,7 @@ def _build_mm_batch(device, dtype, n_mm=8, seed=0):
     rcell = torch.eye(3, dtype=dtype, device=device).unsqueeze(0) * (
         2.0 * math.pi / cell_len
     )
+    volume = torch.det(cell.view(1, 3, 3))
 
     # MM cloud placed in a 4-8 Å shell around the origin so it sits clearly
     # outside the 2-atom QM region.
@@ -135,8 +136,8 @@ def _build_mm_batch(device, dtype, n_mm=8, seed=0):
         "ptr": ptr,
         "cell": cell.view(-1, 9),
         "rcell": rcell.view(-1, 9),
-        "volume": torch.ones((1,), dtype=dtype, device=device),
-        "pbc": torch.zeros((1, 3), dtype=torch.bool, device=device),
+        "volume": volume,
+        "pbc": torch.full((1, 3), bool(pbc), dtype=torch.bool, device=device),
         "external_field": torch.zeros((1, 3), dtype=dtype, device=device),
         "fermi_level": torch.zeros((1,), dtype=dtype, device=device),
         "total_charge": torch.zeros((1,), dtype=dtype, device=device),
@@ -153,8 +154,10 @@ def _run_route(model, data, route: str) -> dict:
     out = model(data, training=False, compute_force=True)
     energy = out["energy"].detach().clone()
     forces = out["forces"].detach().clone()
+    electrostatic_energy = out["electrostatic_energy"].detach().clone()
     ml_mm_electrostatic_energy = out["ml_mm_electrostatic_energy"].detach().clone()
     ml_mm_dipole_energy = out["ml_mm_dipole_energy"].detach().clone()
+    mm_mm_electrostatic_energy = out["mm_mm_electrostatic_energy"].detach().clone()
     mm_forces = out["mm_forces"]
     assert mm_forces is not None, "expected mm_forces in output when MM input present"
     mm_forces = mm_forces.detach().clone()
@@ -163,9 +166,11 @@ def _run_route(model, data, route: str) -> dict:
     return {
         "energy": energy,
         "forces": forces,
+        "electrostatic_energy": electrostatic_energy,
         "mm_forces": mm_forces,
         "ml_mm_electrostatic_energy": ml_mm_electrostatic_energy,
         "ml_mm_dipole_energy": ml_mm_dipole_energy,
+        "mm_mm_electrostatic_energy": mm_mm_electrostatic_energy,
         "charges": charges,
         "density_coefficients": density_coefficients,
     }
@@ -293,3 +298,73 @@ def test_ml_mm_dipole_energy_matches_direct_pair_sum():
     torch.testing.assert_close(
         out["ml_mm_electrostatic_energy"], expected_total, atol=1e-9, rtol=1e-9
     )
+
+
+def test_mace_mm_embedding_reports_no_mm_mm_energy():
+    """MACE owns ML-MM Coulomb only; MM-MM Coulomb remains an OpenMM term."""
+    device = torch.device("cpu")
+    model = _build_minimal_model(device, torch.float64)
+    data = _build_mm_batch(device, torch.float64)
+    out = _run_route(model, data, "source_target")
+    torch.testing.assert_close(
+        out["mm_mm_electrostatic_energy"],
+        torch.zeros_like(out["mm_mm_electrostatic_energy"]),
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
+def test_pbc_mace_returns_mm_only_kspace_diagnostic():
+    """Under PBC, MACE returns E(ML+MM)-E(MM) and exposes E(MM)."""
+    device = torch.device("cpu")
+    model = _build_minimal_model(device, torch.float64)
+    data = _build_mm_batch(device, torch.float64, pbc=True)
+    out = _run_route(model, data, "source_target")
+    assert out["mm_mm_electrostatic_energy"].abs().max().item() > 1e-12
+    torch.testing.assert_close(
+        out["electrostatic_energy"],
+        out["ml_mm_electrostatic_energy"],
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
+def test_ml_mm_coulomb_uses_minimum_image_under_pbc():
+    device = torch.device("cpu")
+    dtype = torch.float64
+    model = _build_minimal_model(device, dtype)
+    ml_positions = torch.tensor([[0.2, 0.0, 0.0]], device=device, dtype=dtype)
+    mm_positions = torch.tensor([[9.8, 0.0, 0.0]], device=device, dtype=dtype)
+    ml_charges = torch.tensor([1.0], device=device, dtype=dtype)
+    mm_charges = torch.tensor([1.0], device=device, dtype=dtype)
+    batch = torch.zeros(1, dtype=torch.long, device=device)
+    cell = torch.eye(3, dtype=dtype, device=device).unsqueeze(0) * 10.0
+    pbc = torch.tensor([[True, True, True]], dtype=torch.bool, device=device)
+
+    energy_pbc, _ = model._ml_mm_coulomb(
+        ml_charges=ml_charges,
+        ml_dipoles=None,
+        ml_positions=ml_positions,
+        ml_batch=batch,
+        mm_charges=mm_charges,
+        mm_positions=mm_positions,
+        mm_batch=batch,
+        num_graphs=1,
+        cell=cell,
+        pbc=pbc,
+    )
+    energy_nonpbc, _ = model._ml_mm_coulomb(
+        ml_charges=ml_charges,
+        ml_dipoles=None,
+        ml_positions=ml_positions,
+        ml_batch=batch,
+        mm_charges=mm_charges,
+        mm_positions=mm_positions,
+        mm_batch=batch,
+        num_graphs=1,
+    )
+
+    expected_pbc = torch.tensor([14.3996454784255 / 0.4], device=device, dtype=dtype)
+    expected_nonpbc = torch.tensor([14.3996454784255 / 9.6], device=device, dtype=dtype)
+    torch.testing.assert_close(energy_pbc, expected_pbc, atol=1e-10, rtol=1e-10)
+    torch.testing.assert_close(energy_nonpbc, expected_nonpbc, atol=1e-10, rtol=1e-10)
