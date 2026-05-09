@@ -1399,20 +1399,55 @@ class PolarMACE(ScaleShiftMACE):
         # J. Phys. Chem. A): cap atoms contribute zero density to all
         # Coulomb sums but remain real atoms for the rest of the model
         # (atomic-energy contribution, exchange-correlation features,
-        # field-dependent polarization).
+        # field-dependent polarization during the SCF iteration).
         #
         # ``data["virtual_hydrogen_mask"]`` is an optional boolean
         # tensor of shape (N,), True for atoms whose electrostatic
         # source coefficients should be zeroed before any Coulomb sum.
         # Default (mask absent or all-False): no change in behavior.
+        #
+        # Note: the SCF polarization field path (the source_feats_alpha
+        # / source_feats_beta calls earlier in this forward) sees the
+        # *unmasked* spin charges. This is intentional under the Z1
+        # convention — the cap participates in the SCF polarization
+        # response so that the rest of the molecule's predicted
+        # multipoles correctly reflect a chemically saturated valence,
+        # but the cap's *output* electrostatic source contribution is
+        # zeroed by the mask below before any Coulomb sum.
         virtual_hydrogen_mask = _get_optional_data_tensor(
             data, "virtual_hydrogen_mask"
         )
         if virtual_hydrogen_mask is not None:
+            # Defensive: align device with the density tensor and
+            # validate shape so a length mismatch raises a clear
+            # error rather than silently broadcasting. (Codex review
+            # MINOR finding.)
+            virtual_hydrogen_mask = virtual_hydrogen_mask.to(
+                charge_density_mul_ir.device
+            )
+            if virtual_hydrogen_mask.shape != (charge_density_mul_ir.shape[0],):
+                raise ValueError(
+                    "virtual_hydrogen_mask shape "
+                    f"{tuple(virtual_hydrogen_mask.shape)} does not "
+                    f"match number of atoms "
+                    f"{charge_density_mul_ir.shape[0]}; expected a "
+                    "1D bool tensor of length N."
+                )
             keep = (~virtual_hydrogen_mask.bool()).to(
                 charge_density_mul_ir.dtype
             )
             keep_2d = keep.view(-1, 1)
+            # Capture the cap monopole charge that's about to be
+            # zeroed. The earlier scatter_normalize_charges_ calls
+            # enforce sum(monopole) == data["total_charge"] over ALL
+            # atoms (including caps), so naively zeroing caps would
+            # leave sum(monopole) over real atoms below the requested
+            # total. Redistribute the lost cap monopole equally over
+            # the remaining real atoms (per-graph) to preserve charge
+            # conservation. (Codex review MAJOR finding.)
+            cap_monopole_per_atom = charge_density_mul_ir[:, 0] * (
+                1.0 - keep
+            )
             charge_density_mul_ir = charge_density_mul_ir * keep_2d
             spin_density_mul_ir = spin_density_mul_ir * keep_2d
             spin_charge_density_mul_ir = (
@@ -1420,6 +1455,37 @@ class PolarMACE(ScaleShiftMACE):
             )
             charge_density = charge_density * keep_2d
             spin_density = spin_density * keep_2d
+
+            graph_count = int(num_graphs)
+            cap_monopole_per_graph = scatter_sum(
+                cap_monopole_per_atom,
+                data["batch"],
+                dim=0,
+                dim_size=graph_count,
+            )
+            n_real_per_graph = scatter_sum(
+                keep,
+                data["batch"],
+                dim=0,
+                dim_size=graph_count,
+            )
+            # Avoid divide-by-zero in graphs where every atom is
+            # masked (degenerate / unit-test case). In that case the
+            # graph's electrostatic contribution is zero anyway.
+            safe_n = n_real_per_graph.clamp_min(1.0)
+            delta_per_atom = (
+                cap_monopole_per_graph / safe_n
+            )[data["batch"]] * keep
+            # Add to the monopole channel of charge_density_mul_ir
+            # and the (only) channel of charge_density. Higher
+            # multipoles (l>=1) on caps were also zeroed but are not
+            # redistributed — under Z1 the cap carries no dipole
+            # either, and the real atoms' dipoles are already SCF-
+            # converged for the capped molecule.
+            mono_correction = torch.zeros_like(charge_density_mul_ir)
+            mono_correction[:, 0] = delta_per_atom
+            charge_density_mul_ir = charge_density_mul_ir + mono_correction
+            charge_density = charge_density + mono_correction
         total_charge, total_dipole = compute_total_charge_dipole_permuted(
             charge_density_mul_ir, positions, data["batch"], num_graphs
         )

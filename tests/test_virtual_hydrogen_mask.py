@@ -218,3 +218,67 @@ def test_virtual_hydrogen_mask_one_atom_drops_its_contribution(minimal_model):
     # If atom 0 had predicted charge of meaningful magnitude, |e_full|
     # ≠ |e_masked|. We don't make stronger claims about sign here
     # because the energy can be small and noisy in this tiny test.
+
+
+def test_virtual_hydrogen_mask_preserves_total_charge(minimal_model):
+    """When the user requests a specific total charge (via
+    ``data['total_charge']``), the masking must not silently shift the
+    sum of monopole density across real atoms below the requested
+    value. Codex review MAJOR finding: pre-masking, the
+    ``scatter_normalize_charges_`` step distributes deficit/surplus
+    over ALL atoms including caps; naively zeroing caps would leave
+    real atoms short. The mask code now redistributes the lost cap
+    monopole back over real atoms to preserve total charge.
+
+    Verify by checking that the sum of returned monopole density over
+    the masked atoms matches the sum without masking, within float64
+    tolerance.
+    """
+    model, device, dtype = minimal_model
+    data = _build_batch(device, dtype)
+
+    # Set a non-zero requested total charge to exercise the
+    # normalization scatter on the path that has the bug.
+    data["total_charge"] = torch.tensor([0.5], device=device, dtype=dtype)
+
+    out_unmasked = model(data, training=False, compute_force=True)
+    sum_full = float(
+        out_unmasked["density_coefficients"][:, 0].detach().sum()
+    )
+
+    data_mask = dict(data)
+    data_mask["virtual_hydrogen_mask"] = torch.tensor(
+        [True, False], dtype=torch.bool, device=device
+    )
+    out_masked = model(data_mask, training=False, compute_force=True)
+    sum_masked_real = float(
+        out_masked["density_coefficients"][:, 0].detach().sum()
+    )
+
+    # Both sums should equal the requested total charge (within
+    # the SCF / float64 tolerance of the underlying solver).
+    expected_total = 0.5
+    assert sum_full == pytest.approx(expected_total, abs=1e-6), (
+        "Unmasked total monopole density should match requested "
+        f"total_charge. Got {sum_full}, expected {expected_total}."
+    )
+    assert sum_masked_real == pytest.approx(expected_total, abs=1e-6), (
+        "Masked total monopole density should still match requested "
+        f"total_charge after cap charge is redistributed onto real "
+        f"atoms. Got {sum_masked_real}, expected {expected_total}."
+    )
+
+
+def test_virtual_hydrogen_mask_shape_validation(minimal_model):
+    """A wrong-shape mask raises a clear error instead of silently
+    broadcasting. (Codex review MINOR finding.)"""
+    model, device, dtype = minimal_model
+    data = _build_batch(device, dtype)
+    n_atoms = data["positions"].shape[0]
+
+    # Wrong length: n_atoms + 1.
+    data["virtual_hydrogen_mask"] = torch.zeros(
+        n_atoms + 1, dtype=torch.bool, device=device
+    )
+    with pytest.raises(ValueError, match=r"virtual_hydrogen_mask shape"):
+        model(data, training=False, compute_force=True)
