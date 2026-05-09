@@ -282,3 +282,42 @@ def test_virtual_hydrogen_mask_shape_validation(minimal_model):
     )
     with pytest.raises(ValueError, match=r"virtual_hydrogen_mask shape"):
         model(data, training=False, compute_force=True)
+
+
+def test_virtual_hydrogen_mask_keeps_cap_forces_nonzero(minimal_model):
+    """Masked atoms must still receive forces from non-electrostatic
+    parts of the model (atomic-energy contribution, message-passing
+    interactions, exchange-correlation features). The mask zeroes
+    only their *electrostatic source coefficients*, not their force.
+
+    Codex review CHECK 2 recommendation: openmm-ml's ONIOM closure
+    redistributes cap forces onto Q,M atoms via a Jacobian; if the
+    cap rows in ``out["forces"]`` were silently zeroed by the mask,
+    the redistribution would produce identically zero contribution
+    to Q,M and the cap's force would be lost. This test pins that
+    masked-atom force rows are non-zero so the redistribution
+    pipeline gets meaningful data.
+    """
+    model, device, dtype = minimal_model
+    data = _build_batch(device, dtype)
+    n_atoms = data["positions"].shape[0]
+
+    # Mask atom 0 (treat it as a cap): its electrostatic source
+    # contribution is zeroed, but force on atom 0 must still be
+    # non-zero from message-passing + atomic-energy contributions.
+    data["virtual_hydrogen_mask"] = torch.tensor(
+        [True, False], dtype=torch.bool, device=device
+    )
+    out = model(data, training=False, compute_force=True)
+    forces = out["forces"].detach()
+    assert forces.shape[0] == n_atoms, (
+        "Forces array should still have one row per input atom, "
+        f"including masked ones. Got shape {tuple(forces.shape)}."
+    )
+    masked_force = forces[0]
+    masked_force_norm = float(torch.linalg.norm(masked_force))
+    assert masked_force_norm > 1e-12, (
+        "Masked atom force should be non-zero — only its electrostatic "
+        "source contribution is zeroed, not the rest of the model. "
+        f"Got masked force = {masked_force.tolist()}."
+    )
