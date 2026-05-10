@@ -1389,37 +1389,6 @@ class PolarMACE(ScaleShiftMACE):
             if charges_to_mul_ir is not None
             else spin_charge_density
         )
-        # Virtual-hydrogen (link-atom cap) electrostatic masking.
-        #
-        # When openmm-ml's ONIOM-EE mode appends K virtual-hydrogen
-        # cap atoms to MACE's input, those atoms must be electrostatically
-        # silent on the MACE side so the cap-related Coulomb cancels
-        # bit-exactly against the q_cap=0 convention used on the MM
-        # side. Standard QM/MM Z1 convention (Lin & Truhlar 2005,
-        # J. Phys. Chem. A): cap atoms contribute zero density to all
-        # Coulomb sums but remain real atoms for the rest of the model
-        # (atomic-energy contribution, exchange-correlation features,
-        # field-dependent polarization).
-        #
-        # ``data["virtual_hydrogen_mask"]`` is an optional boolean
-        # tensor of shape (N,), True for atoms whose electrostatic
-        # source coefficients should be zeroed before any Coulomb sum.
-        # Default (mask absent or all-False): no change in behavior.
-        virtual_hydrogen_mask = _get_optional_data_tensor(
-            data, "virtual_hydrogen_mask"
-        )
-        if virtual_hydrogen_mask is not None:
-            keep = (~virtual_hydrogen_mask.bool()).to(
-                charge_density_mul_ir.dtype
-            )
-            keep_2d = keep.view(-1, 1)
-            charge_density_mul_ir = charge_density_mul_ir * keep_2d
-            spin_density_mul_ir = spin_density_mul_ir * keep_2d
-            spin_charge_density_mul_ir = (
-                spin_charge_density_mul_ir * keep.view(-1, 1, 1)
-            )
-            charge_density = charge_density * keep_2d
-            spin_density = spin_density * keep_2d
         total_charge, total_dipole = compute_total_charge_dipole_permuted(
             charge_density_mul_ir, positions, data["batch"], num_graphs
         )
