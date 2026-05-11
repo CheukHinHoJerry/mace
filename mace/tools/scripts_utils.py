@@ -339,9 +339,9 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
     except AttributeError:
         correlation = model.products[0].symmetric_contractions.contraction_degree
     
-    # manual 
-    contraction_cls = "SymmetricContraction"
-    contraction_cls_first = "SymmetricContraction"
+    # infer contraction classes from instantiated product blocks
+    contraction_cls_first = getattr(model.products[0], "contraction_cls", "SymmetricContraction")
+    contraction_cls = getattr(model.products[-1], "contraction_cls", contraction_cls_first)
 
     # for magnetic mace
     m_max = getattr(model, "m_max", None)
@@ -393,8 +393,8 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "m_max": m_max,
         "num_mag_radial_basis": num_mag_radial_basis,
         "max_m_ell": max_m_ell,
-        "contraction_cls": "SymmetricContraction",
-        "contraction_cls_first": "SymmetricContraction",
+        "contraction_cls": contraction_cls,
+        "contraction_cls_first": contraction_cls_first,
     }
     if hasattr(model, "onebody_magmombasis_coeffs"):
         config["num_mag_radial_basis_one_body"] = int(model.onebody_magmombasis_coeffs.shape[1])
