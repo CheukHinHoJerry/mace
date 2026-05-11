@@ -9,10 +9,13 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 
 from mace.cli.fine_tuning_select import select_samples
+from mace.tools.run_train_utils import normalize_file_paths
 from mace.tools.scripts_utils import (
     SubsetCollection,
     dict_to_namespace,
+    extract_config_mace_model,
     get_dataset_from_xyz,
+    check_path_ase_read,
 )
 
 
@@ -201,3 +204,121 @@ def assemble_mp_data(
         raise RuntimeError(
             "Model or descriptors download failed and no local model found"
         ) from exc
+
+
+def prepare_custom_pt_head(
+    args: argparse.Namespace,
+    avg_num_neighbors: float,
+) -> HeadConfig:
+    r"""Prepare the replay head used for multihead fine-tuning with a custom foundation model."""
+    pt_energy_key = args.pt_energy_key or args.energy_key
+    pt_forces_key = args.pt_forces_key or args.forces_key
+    pt_stress_key = args.pt_stress_key or args.stress_key
+    pt_virials_key = args.pt_virials_key or args.virials_key
+    pt_dipole_key = args.pt_dipole_key or args.dipole_key
+    pt_charges_key = args.pt_charges_key or args.charges_key
+    pt_magmom_key = args.pt_magmom_key or args.magmom_key
+
+    logging.info(
+        f"Using the following keys for pt_head: energy={pt_energy_key}, forces={pt_forces_key}, "
+        f"stress={pt_stress_key}, virials={pt_virials_key}, dipole={pt_dipole_key}, charges={pt_charges_key}, magmom={pt_magmom_key}"
+    )
+
+    pt_train_file = normalize_file_paths(args.pt_train_file)
+    pt_valid_file = normalize_file_paths(args.pt_valid_file) if args.pt_valid_file else None
+    is_ase_readable = all(check_path_ase_read(f) for f in pt_train_file)
+
+    head_config_pt = HeadConfig(
+        head_name="pt_head",
+        train_file=pt_train_file,
+        valid_file=pt_valid_file,
+        E0s="foundation",
+        statistics_file=args.statistics_file,
+        valid_fraction=args.valid_fraction,
+        config_type_weights=None,
+        energy_key=pt_energy_key,
+        forces_key=pt_forces_key,
+        stress_key=pt_stress_key,
+        virials_key=pt_virials_key,
+        dipole_key=pt_dipole_key,
+        charges_key=pt_charges_key,
+        magmom_key=pt_magmom_key,
+        keep_isolated_atoms=args.keep_isolated_atoms,
+        avg_num_neighbors=avg_num_neighbors,
+        compute_avg_num_neighbors=False,
+    )
+
+    if is_ase_readable:
+        collections, atomic_energies_dict = get_dataset_from_xyz(
+            work_dir=args.work_dir,
+            train_path=args.pt_train_file,
+            valid_path=args.pt_valid_file,
+            valid_fraction=args.valid_fraction,
+            config_type_weights=None,
+            test_path=None,
+            seed=args.seed,
+            energy_key=pt_energy_key,
+            forces_key=pt_forces_key,
+            stress_key=pt_stress_key,
+            virials_key=pt_virials_key,
+            dipole_key=pt_dipole_key,
+            charges_key=pt_charges_key,
+            magmom_key=pt_magmom_key,
+            head_name="pt_head",
+            keep_isolated_atoms=args.keep_isolated_atoms,
+        )
+        head_config_pt.collections = collections
+        if atomic_energies_dict:
+            head_config_pt.atomic_energies_dict = atomic_energies_dict
+            logging.info(
+                "Using atomic energies inferred from pt_train_file isolated atoms for pt_head."
+            )
+        logging.info(
+            f"Loaded ASE readable pretraining data: train={len(collections.train)}, valid={len(collections.valid)}"
+        )
+    else:
+        logging.info(
+            f"Pretraining data file(s) will be loaded as LMDB/HDF5: {pt_train_file}"
+        )
+
+    return head_config_pt
+
+
+def inherit_magnetic_hyperparameters_from_foundation(
+    args: argparse.Namespace, model_foundation: torch.nn.Module
+) -> Dict[str, Any]:
+    r"""Copy magnetic basis hyperparameters from the foundation checkpoint onto args."""
+    foundation_config = extract_config_mace_model(model_foundation)
+    inherited_magnetic_args: Dict[str, Any] = {}
+
+    foundation_m_max = foundation_config.get("m_max")
+    if foundation_m_max is not None:
+        if torch.is_tensor(foundation_m_max):
+            foundation_m_max = foundation_m_max.detach().cpu().tolist()
+        elif hasattr(foundation_m_max, "tolist"):
+            foundation_m_max = foundation_m_max.tolist()
+        args.m_max = foundation_m_max
+        inherited_magnetic_args["m_max_len"] = len(foundation_m_max)
+
+    foundation_max_m_ell = foundation_config.get("max_m_ell")
+    if foundation_max_m_ell is not None:
+        args.max_m_ell = int(foundation_max_m_ell)
+        inherited_magnetic_args["max_m_ell"] = args.max_m_ell
+
+    foundation_num_mag_radial_basis = foundation_config.get("num_mag_radial_basis")
+    if foundation_num_mag_radial_basis is not None:
+        args.num_mag_radial_basis = int(foundation_num_mag_radial_basis)
+        inherited_magnetic_args["num_mag_radial_basis"] = args.num_mag_radial_basis
+
+    foundation_num_mag_radial_basis_one_body = foundation_config.get(
+        "num_mag_radial_basis_one_body"
+    )
+    if foundation_num_mag_radial_basis_one_body is not None:
+        args.num_mag_radial_basis_one_body = int(
+            foundation_num_mag_radial_basis_one_body
+        )
+        inherited_magnetic_args["num_mag_radial_basis_one_body"] = (
+            args.num_mag_radial_basis_one_body
+        )
+
+    return inherited_magnetic_args

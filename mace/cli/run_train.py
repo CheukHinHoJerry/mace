@@ -33,7 +33,9 @@ from mace.tools.multihead_tools import (
     HeadConfig,
     assemble_mp_data,
     dict_head_to_dataclass,
+    inherit_magnetic_hyperparameters_from_foundation,
     prepare_default_head,
+    prepare_custom_pt_head,
 )
 from mace.tools.run_train_utils import (
     combine_datasets,
@@ -154,6 +156,14 @@ def run(args) -> None:
                 f"Using foundation model {args.foundation_model} as initial checkpoint."
             )
         args.r_max = model_foundation.r_max.item()
+        inherited_magnetic_args = inherit_magnetic_hyperparameters_from_foundation(
+            args, model_foundation
+        )
+
+        if inherited_magnetic_args:
+            logging.info(
+                f"Inheriting magnetic hyperparameters from foundation model: {inherited_magnetic_args}"
+            )
         if (
             args.foundation_model not in ["small", "medium", "large"]
             and args.pt_train_file is None
@@ -332,79 +342,10 @@ def run(args) -> None:
                 f"Using foundation model for multiheads finetuning with {args.pt_train_file}"
             )
             heads = list(dict.fromkeys(["pt_head"] + heads))
-
-            # Use pt-specific keys if provided, otherwise fall back to general keys
-            pt_energy_key = args.pt_energy_key or args.energy_key
-            pt_forces_key = args.pt_forces_key or args.forces_key
-            pt_stress_key = args.pt_stress_key or args.stress_key
-            pt_virials_key = args.pt_virials_key or args.virials_key
-            pt_dipole_key = args.pt_dipole_key or args.dipole_key
-            pt_charges_key = args.pt_charges_key or args.charges_key
-            pt_magmom_key = args.pt_magmom_key or args.magmom_key
-
-            logging.info(
-                f"Using the following keys for pt_head: energy={pt_energy_key}, forces={pt_forces_key}, "
-                f"stress={pt_stress_key}, virials={pt_virials_key}, dipole={pt_dipole_key}, charges={pt_charges_key}, magmom={pt_magmom_key}"
-            )
-
-            # Normalize file paths
-            pt_train_file = normalize_file_paths(args.pt_train_file)
-            pt_valid_file = (
-                normalize_file_paths(args.pt_valid_file) if args.pt_valid_file else None
-            )
-
-            # Check if pt_train_file is ASE readable (e.g., xyz) vs LMDB/HDF5
-            is_ase_readable = all(check_path_ase_read(f) for f in pt_train_file)
-
-            head_config_pt = HeadConfig(
-                head_name="pt_head",
-                train_file=pt_train_file,
-                valid_file=pt_valid_file,
-                E0s="foundation",
-                statistics_file=args.statistics_file,
-                valid_fraction=args.valid_fraction,
-                config_type_weights=None,
-                energy_key=pt_energy_key,
-                forces_key=pt_forces_key,
-                stress_key=pt_stress_key,
-                virials_key=pt_virials_key,
-                dipole_key=pt_dipole_key,
-                charges_key=pt_charges_key,
-                magmom_key=pt_magmom_key,
-                keep_isolated_atoms=args.keep_isolated_atoms,
+            head_config_pt = prepare_custom_pt_head(
+                args=args,
                 avg_num_neighbors=model_foundation.interactions[0].avg_num_neighbors,
-                compute_avg_num_neighbors=False,
             )
-
-            if is_ase_readable:
-                # For xyz files, use get_dataset_from_xyz
-                collections, atomic_energies_dict = get_dataset_from_xyz(
-                    work_dir=args.work_dir,
-                    train_path=args.pt_train_file,
-                    valid_path=args.pt_valid_file,
-                    valid_fraction=args.valid_fraction,
-                    config_type_weights=None,
-                    test_path=None,
-                    seed=args.seed,
-                    energy_key=pt_energy_key,
-                    forces_key=pt_forces_key,
-                    stress_key=pt_stress_key,
-                    virials_key=pt_virials_key,
-                    dipole_key=pt_dipole_key,
-                    charges_key=pt_charges_key,
-                    magmom_key=pt_magmom_key,
-                    head_name="pt_head",
-                    keep_isolated_atoms=args.keep_isolated_atoms,
-                )
-                head_config_pt.collections = collections
-                logging.info(
-                    f"Loaded ASE readable pretraining data: train={len(collections.train)}, valid={len(collections.valid)}"
-                )
-            else:
-                logging.info(
-                    f"Pretraining data file(s) will be loaded as LMDB/HDF5: {pt_train_file}"
-                )
-
             head_configs.append(head_config_pt)
 
         all_ase_readable = all(
@@ -500,21 +441,22 @@ def run(args) -> None:
         assert (
             model_foundation is not None
         ), "Model foundation must be provided for multiheads finetuning"
-        z_table_foundation = AtomicNumberTable(
-            [int(z) for z in model_foundation.atomic_numbers]
-        )
-        foundation_atomic_energies = model_foundation.atomic_energies_fn.atomic_energies
-        if foundation_atomic_energies.ndim > 1:
-            foundation_atomic_energies = foundation_atomic_energies.squeeze()
-            if foundation_atomic_energies.ndim == 2:
-                foundation_atomic_energies = foundation_atomic_energies[0]
-                logging.info("Foundation model has multiple heads, using the first head as foundation E0s.")
-        atomic_energies_dict["pt_head"] = {
-            z: foundation_atomic_energies[
-                z_table_foundation.z_to_index(z)
-            ].item()
-            for z in z_table.zs
-        }
+        if "pt_head" not in atomic_energies_dict or not atomic_energies_dict["pt_head"]:
+            z_table_foundation = AtomicNumberTable(
+                [int(z) for z in model_foundation.atomic_numbers]
+            )
+            foundation_atomic_energies = model_foundation.atomic_energies_fn.atomic_energies
+            if foundation_atomic_energies.ndim > 1:
+                foundation_atomic_energies = foundation_atomic_energies.squeeze()
+                if foundation_atomic_energies.ndim == 2:
+                    foundation_atomic_energies = foundation_atomic_energies[0]
+                    logging.info("Foundation model has multiple heads, using the first head as foundation E0s.")
+            atomic_energies_dict["pt_head"] = {
+                z: foundation_atomic_energies[
+                    z_table_foundation.z_to_index(z)
+                ].item()
+                for z in z_table.zs
+            }
 
     # Padding atomic energies if keeping all elements of the foundation model
     if args.foundation_model_elements and model_foundation:
