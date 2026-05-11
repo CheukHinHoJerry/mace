@@ -583,7 +583,8 @@ class MagneticMACE(torch.nn.Module):
         )
     
         # --- interaction and product basis modules ---
-        inter = interaction_cls_first(
+        self.first_interaction_is_magnetic = "Magnetic" in interaction_cls_first.__name__
+        first_inter_kwargs = dict(
             node_attrs_irreps=node_attr_irreps,
             node_feats_irreps=node_feats_irreps,
             edge_attrs_irreps=sh_irreps,
@@ -593,9 +594,13 @@ class MagneticMACE(torch.nn.Module):
             avg_num_neighbors=avg_num_neighbors,
             radial_MLP=radial_MLP,
             cueq_config=cueq_config,
-            magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
-            magmom_node_attrs_irreps=magmom_sh_irreps
         )
+        if self.first_interaction_is_magnetic:
+            first_inter_kwargs.update(
+                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                magmom_node_attrs_irreps=magmom_sh_irreps,
+            )
+        inter = interaction_cls_first(**first_inter_kwargs)
         self.interactions = torch.nn.ModuleList([inter])
 
         # Use the appropriate self connection at the first layer for proper E0
@@ -627,19 +632,8 @@ class MagneticMACE(torch.nn.Module):
                 contraction_cls=contraction_cls_first)
         else:
             if "NonSpinOrbitCoupled" in self.__class__.__name__:
-                # import pdb; pdb.set_trace()
-                prod = EquivariantProductBasisNonSOCWithSelfMagmomBlock(
-                node_feats_irreps=node_feats_irreps_out,
-                target_irreps=hidden_irreps,
-                correlation=correlation[0],
-                num_elements=num_elements,
-                use_sc=use_sc_first,
-                cueq_config=cueq_config,
-                contraction_cls=contraction_cls_first,
-                magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
-                magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)                    
-                )
-                magmom_prod = EquivariantProductBasisNonSOCWithSelfMagmomBlock(
+                if self.first_interaction_is_magnetic:
+                    prod = EquivariantProductBasisNonSOCWithSelfMagmomBlock(
                     node_feats_irreps=node_feats_irreps_out,
                     target_irreps=hidden_irreps,
                     correlation=correlation[0],
@@ -648,7 +642,40 @@ class MagneticMACE(torch.nn.Module):
                     cueq_config=cueq_config,
                     contraction_cls=contraction_cls_first,
                     magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
-                    magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+                    magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)                    
+                    )
+                    magmom_prod = EquivariantProductBasisNonSOCWithSelfMagmomBlock(
+                        node_feats_irreps=node_feats_irreps_out,
+                        target_irreps=hidden_irreps,
+                        correlation=correlation[0],
+                        num_elements=num_elements,
+                        use_sc=use_sc_first,
+                        cueq_config=cueq_config,
+                        contraction_cls=contraction_cls_first,
+                        magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                        magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+                        )
+                else:
+                    first_contraction_cls = contraction_cls_first
+                    if first_contraction_cls == "NonSOCSymmetricContraction":
+                        first_contraction_cls = "SymmetricContraction"
+                    prod = EquivariantProductBasisBlock(
+                        node_feats_irreps=node_feats_irreps_out,
+                        target_irreps=hidden_irreps,
+                        correlation=correlation[0],
+                        num_elements=num_elements,
+                        use_sc=use_sc_first,
+                        cueq_config=cueq_config,
+                        contraction_cls=first_contraction_cls,
+                    )
+                    magmom_prod = EquivariantProductBasisBlock(
+                        node_feats_irreps=node_feats_irreps_out,
+                        target_irreps=hidden_irreps,
+                        correlation=correlation[0],
+                        num_elements=num_elements,
+                        use_sc=use_sc_first,
+                        cueq_config=cueq_config,
+                        contraction_cls=first_contraction_cls,
                     )
             else:
                 if "OneBody" not in self.__class__.__name__:
@@ -740,6 +767,38 @@ class MagneticMACE(torch.nn.Module):
                     cueq_config=cueq_config,
                     contraction_cls=contraction_cls
                 )
+            elif "NonSpinOrbitCoupled" in self.__class__.__name__:
+                # Non-SOC interaction returns coupled A-tensors built from conv_tp_r/conv_tp_m
+                # channels, so product/contraction irreps must match those exact branches.
+                nonsoc_r_irreps = interaction_irreps
+                nonsoc_m_irreps = o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
+                if hasattr(inter, "conv_tp_r"):
+                    nonsoc_r_irreps = inter.conv_tp_r.irreps_out
+                if hasattr(inter, "conv_tp_m"):
+                    nonsoc_m_irreps = inter.conv_tp_m.irreps_out
+
+                prod = EquivariantProductBasisNonSOCWithSelfMagmomBlock(
+                    node_feats_irreps=nonsoc_r_irreps,
+                    target_irreps=hidden_irreps_out,
+                    correlation=correlation[i + 1],
+                    num_elements=num_elements,
+                    use_sc=True,
+                    cueq_config=cueq_config,
+                    contraction_cls=contraction_cls,
+                    magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                    magmom_node_attrs_irreps=nonsoc_m_irreps,
+                )
+                magmom_prod = EquivariantProductBasisNonSOCWithSelfMagmomBlock(
+                    node_feats_irreps=nonsoc_r_irreps,
+                    target_irreps=hidden_irreps_out,
+                    correlation=correlation[i + 1],
+                    num_elements=num_elements,
+                    use_sc=True,
+                    cueq_config=cueq_config,
+                    contraction_cls=contraction_cls,
+                    magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
+                    magmom_node_attrs_irreps=nonsoc_m_irreps,
+                )
             else:
                 prod = EquivariantProductBasisWithSelfMagmomBlock(
                     node_feats_irreps=interaction_irreps,
@@ -748,7 +807,7 @@ class MagneticMACE(torch.nn.Module):
                     correlation=correlation[i + 1],
                     num_elements=num_elements,
                     use_sc = True,
-                    cueq_config=prod.cueq_config,
+                    cueq_config=cueq_config,
                     contraction_cls=contraction_cls,
                     magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
                     magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
@@ -760,7 +819,7 @@ class MagneticMACE(torch.nn.Module):
                     correlation=correlation[i + 1],
                     num_elements=num_elements,
                     use_sc = True,
-                    cueq_config=prod.cueq_config,
+                    cueq_config=cueq_config,
                     contraction_cls=contraction_cls,
                     magmom_node_inv_feats_irreps=o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e"),
                     magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(self.mag_spherical_harmonics._lmax)
@@ -1516,29 +1575,80 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
         # Interactions
         node_es_list = [pair_node_energy]
         node_feats_list = []
-        
+        magmom_node_feats_list = []
+
 
         # one_body_magmom_energy = onebody_magmom_contri[num_atoms_arange, node_heads]
 
         for interaction, product, readout in zip(
             self.interactions, self.products, self.readouts
         ):
-            node_feats, sc = interaction(
-                node_attrs=data["node_attrs"],
-                node_feats=node_feats,
-                edge_attrs=edge_attrs,
-                edge_feats=edge_feats,
-                edge_index=data["edge_index"],
-                magmom_node_inv_feats=magmom_node_feats,
-                magmom_node_attrs=magmom_node_attrs
-            )
-          
-            node_feats = product(
-                node_feats=node_feats, sc=sc,node_attrs=data["node_attrs"], 
-                magmom_node_inv_feats=magmom_node_feats,
-                magmom_node_attrs=magmom_node_attrs
-            )
-            
+            interaction_name = interaction.__class__.__name__
+            if "Magnetic" in interaction_name:
+                interaction_out = interaction(
+                    node_attrs=data["node_attrs"],
+                    node_feats=node_feats,
+                    edge_attrs=edge_attrs,
+                    edge_feats=edge_feats,
+                    edge_index=data["edge_index"],
+                    magmom_node_inv_feats=magmom_node_feats,
+                    magmom_node_attrs=magmom_node_attrs,
+                )
+            else:
+                interaction_out = interaction(
+                    node_attrs=data["node_attrs"],
+                    node_feats=node_feats,
+                    edge_attrs=edge_attrs,
+                    edge_feats=edge_feats,
+                    edge_index=data["edge_index"],
+                )
+
+            if "NonSpinOrbitCoupled" in interaction_name:
+                (
+                    node_feats_inter,
+                    sc,
+                    node_feats_magmom_inter,
+                    _,
+                    _,
+                    _,
+                ) = interaction_out
+                if node_feats_magmom_inter is not None:
+                    node_feats_inter = node_feats_inter + node_feats_magmom_inter
+                    magmom_node_feats_list.append(node_feats_magmom_inter)
+                else:
+                    magmom_node_feats_list.append(magmom_node_feats)
+            elif isinstance(interaction_out, tuple) and len(interaction_out) == 4:
+                node_feats_inter, node_feats_magmom_inter, sc, _ = interaction_out
+                if node_feats_magmom_inter is not None:
+                    node_feats_inter = node_feats_inter + node_feats_magmom_inter
+                    magmom_node_feats = node_feats_magmom_inter
+                    magmom_node_feats_list.append(node_feats_magmom_inter)
+                else:
+                    magmom_node_feats_list.append(magmom_node_feats)
+            elif isinstance(interaction_out, tuple) and len(interaction_out) == 2:
+                node_feats_inter, sc = interaction_out
+                magmom_node_feats_list.append(magmom_node_feats)
+            else:
+                raise ValueError(
+                    f"Unsupported interaction output signature from {interaction_name}: {type(interaction_out)}"
+                )
+
+            product_name = product.__class__.__name__
+            if "SelfMagmom" in product_name:
+                node_feats = product(
+                    node_feats=node_feats_inter,
+                    sc=sc,
+                    node_attrs=data["node_attrs"],
+                    magmom_node_inv_feats=magmom_node_feats,
+                    magmom_node_attrs=magmom_node_attrs,
+                )
+            else:
+                node_feats = product(
+                    node_feats=node_feats_inter,
+                    sc=sc,
+                    node_attrs=data["node_attrs"],
+                )
+
             node_feats_list.append(node_feats)
             node_es_list.append(
                 readout(node_feats, node_heads)[num_atoms_arange, node_heads]
@@ -1546,7 +1656,11 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
 
 
         # Concatenate node features
-        node_feats_out = torch.cat(node_feats_list, dim=-1) 
+        node_feats_out = torch.cat(node_feats_list, dim=-1)
+        if len(magmom_node_feats_list) > 0:
+            node_feats_out_magmom = torch.cat(magmom_node_feats_list, dim=-1)
+        else:
+            node_feats_out_magmom = torch.zeros_like(node_feats_out)
 
         # Sum over interactions
         node_inter_es = torch.sum(
@@ -1586,6 +1700,7 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
             "hessian": hessian,
             "displacement": displacement,
             "node_feats": node_feats_out,
+            "node_feats_out_magmom": node_feats_out_magmom,
         }
         return output
 
@@ -3296,54 +3411,86 @@ class MagneticSolidHarmonicsNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSe
             self.interactions, self.products, self.magmom_products, self.readouts
         )):
             
-            noSO_node_feats, noSO_sc, noSO_magmom_node_feats, \
-                noSO_magmom_sc, SO_magmom_node_feats, SO_sc = interaction(
-                node_attrs=data["node_attrs"],
-                node_feats=node_feats,
-                edge_attrs=edge_attrs,
-                edge_feats=edge_feats,
-                edge_index=data["edge_index"],
-                magmom_node_inv_feats=magmom_node_feats,
-                magmom_node_attrs=magmom_node_attrs
-            )
-          
-            noSO_node_feats = product(
-                node_feats=noSO_node_feats, sc=noSO_sc ,node_attrs=data["node_attrs"], 
-                magmom_node_inv_feats=magmom_node_feats,
-                magmom_node_attrs=magmom_node_attrs,
-            )
-            
-            noSO_magmom_node_feats = magmom_product(node_feats=noSO_magmom_node_feats, sc=noSO_magmom_sc,node_attrs=data["node_attrs"],
-                                                    magmom_node_inv_feats=magmom_node_feats,magmom_node_attrs=magmom_node_attrs,)
+            if "Magnetic" in interaction.__class__.__name__:
+                noSO_node_feats, noSO_sc, noSO_magmom_node_feats,                     noSO_magmom_sc, SO_magmom_node_feats, SO_sc = interaction(
+                    node_attrs=data["node_attrs"],
+                    node_feats=node_feats,
+                    edge_attrs=edge_attrs,
+                    edge_feats=edge_feats,
+                    edge_index=data["edge_index"],
+                    magmom_node_inv_feats=magmom_node_feats,
+                    magmom_node_attrs=magmom_node_attrs,
+                )
+            else:
+                noSO_node_feats, noSO_sc = interaction(
+                    node_attrs=data["node_attrs"],
+                    node_feats=node_feats,
+                    edge_attrs=edge_attrs,
+                    edge_feats=edge_feats,
+                    edge_index=data["edge_index"],
+                )
+                noSO_magmom_node_feats = None
+                noSO_magmom_sc = None
+                SO_magmom_node_feats = None
+                SO_sc = None
 
-            
-            node_feats_list.append(node_feats)
-            if idx == (len(self.readouts) - 1):    
+            if "SelfMagmom" in product.__class__.__name__:
+                noSO_node_feats = product(
+                    node_feats=noSO_node_feats,
+                    sc=noSO_sc,
+                    node_attrs=data["node_attrs"],
+                    magmom_node_inv_feats=magmom_node_feats,
+                    magmom_node_attrs=magmom_node_attrs,
+                )
+            else:
+                noSO_node_feats = product(
+                    node_feats=noSO_node_feats,
+                    sc=noSO_sc,
+                    node_attrs=data["node_attrs"],
+                )
+
+            # Some non-SOC interaction blocks already return a fully coupled message and
+            # do not provide a separate magnetic branch.
+            if noSO_magmom_node_feats is not None:
+                if "SelfMagmom" in magmom_product.__class__.__name__:
+                    noSO_magmom_node_feats = magmom_product(
+                        node_feats=noSO_magmom_node_feats,
+                        sc=noSO_magmom_sc,
+                        node_attrs=data["node_attrs"],
+                        magmom_node_inv_feats=magmom_node_feats,
+                        magmom_node_attrs=magmom_node_attrs,
+                    )
+                else:
+                    noSO_magmom_node_feats = magmom_product(
+                        node_feats=noSO_magmom_node_feats,
+                        sc=noSO_magmom_sc,
+                        node_attrs=data["node_attrs"],
+                    )
+            else:
+                noSO_magmom_node_feats = torch.zeros_like(noSO_node_feats)
+
+            combined_node_feats = noSO_node_feats + noSO_magmom_node_feats
+            node_feats = combined_node_feats
+            node_feats_list.append(combined_node_feats)
+            if idx == (len(self.readouts) - 1):
                 # linear (natom, num_basis) -> (natom, 1)
-                # remove certain constant to make it matches with E0, 
+                # remove certain constant to make it matches with E0,
                 # self.one_body_magmom_const_correction is computed outside after pre-training
-                # Select the correct coefficient row for each atom via einsum
                 selected_coeffs = torch.einsum(
                     "ns,sbh->nbh", data["node_attrs"], self.onebody_magmombasis_coeffs
                 )
-                #
                 one_body_correction = torch.einsum(
                     'ns,sh->nh', data["node_attrs"], self.one_body_magmom_const_correction
                 )
-                # Compute dot product over nbasis → (n_nodes, num_heads)
                 onebody_magmom_contri = (magmom_one_body_radials.unsqueeze(-1) * selected_coeffs).sum(dim=1)
-
-                # apply correction so that the zero matches E0 exactly
                 onebody_magmom_contri -= one_body_correction
-
-                # Gather energy per atom + one-body magmom contribution for each head
                 node_es_list.append(
-                    readout(noSO_node_feats + noSO_magmom_node_feats, node_heads)[num_atoms_arange, node_heads] +
-                    onebody_magmom_contri[num_atoms_arange, node_heads]
+                    readout(combined_node_feats, node_heads)[num_atoms_arange, node_heads]
+                    + onebody_magmom_contri[num_atoms_arange, node_heads]
                 )
             else:
                 node_es_list.append(
-                    readout(noSO_node_feats + noSO_magmom_node_feats, node_heads)[num_atoms_arange, node_heads]
+                    readout(combined_node_feats, node_heads)[num_atoms_arange, node_heads]
                 )  # {[n_nodes, ], }
 
 
