@@ -41,6 +41,7 @@ from mace.tools.scatter import scatter_mean, scatter_sum
 
 from .blocks import (
     AtomicEnergiesBlock,
+    EquivariantProductBasisNonSOCWithSelfMagmomBlock,
     EquivariantProductBasisWithSelfMagmomBlock,
     InteractionBlock,
     LinearNodeEmbeddingBlock,
@@ -1620,6 +1621,62 @@ class MagneticScaleShiftMACE(MagneticMACE):
             "node_feats": node_feats_out,
         }
         return output
+
+
+class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
+    """Non-spin-orbit-coupled variant of MagneticScaleShiftMACE.
+
+    Identical to MagneticScaleShiftMACE (same forward), except the symmetric
+    contraction in every product block is replaced by NonSOCSymmetricContraction,
+    which contracts the spatial and magnetic-moment angular channels through
+    separate CG paths. The energy is therefore invariant under rotating the
+    magnetic moments independently of the atomic positions (no spin-orbit
+    coupling); only the moment magnitudes |m_i| enter via the scalar radial
+    features. Use the non-SOC magnetic interaction block for both layers.
+    """
+
+    def __init__(self, **kwargs):
+        # Capture before the base consumes kwargs.
+        hidden_irreps = kwargs["hidden_irreps"]
+        if not isinstance(hidden_irreps, o3.Irreps):
+            hidden_irreps = o3.Irreps(hidden_irreps)
+        correlation = kwargs["correlation"]
+        interaction_cls_first = kwargs["interaction_cls_first"]
+
+        super().__init__(**kwargs)  # builds SOC products; we replace them below
+
+        num_interactions = len(self.interactions)
+        if isinstance(correlation, int):
+            correlation = [correlation] * num_interactions
+
+        magmom_inv_irreps = o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e")
+        magmom_attrs_irreps = o3.Irreps.spherical_harmonics(
+            self.mag_solid_harmoics.SH.l_max()
+        )
+        use_sc_first = "Residual" in str(interaction_cls_first)
+
+        products = torch.nn.ModuleList()
+        for i, inter in enumerate(self.interactions):
+            # Last layer keeps scalars only, matching the base recipe.
+            target_irreps = (
+                o3.Irreps(str(hidden_irreps[0]))
+                if i == num_interactions - 1
+                else hidden_irreps
+            )
+            products.append(
+                EquivariantProductBasisNonSOCWithSelfMagmomBlock(
+                    node_feats_irreps=inter.target_irreps,
+                    target_irreps=target_irreps,
+                    correlation=correlation[i],
+                    use_sc=use_sc_first if i == 0 else True,
+                    num_elements=len(self.atomic_numbers),
+                    cueq_config=None,
+                    magmom_node_inv_feats_irreps=magmom_inv_irreps,
+                    magmom_node_attrs_irreps=magmom_attrs_irreps,
+                    contraction_cls="NonSOCSymmetricContraction",
+                )
+            )
+        self.products = products
 
 
 # this does not differentiate through SCF but just a convenient wrapper for equilibrating magmom

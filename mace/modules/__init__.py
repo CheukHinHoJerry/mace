@@ -11,6 +11,7 @@ from .blocks import (
     LinearDipoleReadoutBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
+    MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
     MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
     NonLinearBiasReadoutBlock,
@@ -26,7 +27,12 @@ from .blocks import (
     RealAgnosticResidualNonLinearInteractionBlock,
     ScaleShiftBlock,
 )
-from .extensions import MagneticScaleShiftMACE, MagneticSCFMACE, PolarMACE
+from .extensions import (
+    MagneticNonSOCScaleShiftMACE,
+    MagneticScaleShiftMACE,
+    MagneticSCFMACE,
+    PolarMACE,
+)
 from .gate import GatedEquivariantBlock
 from .loss import (
     DipolePolarLoss,
@@ -69,6 +75,7 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "RealAgnosticResidualNonLinearInteractionBlock": RealAgnosticResidualNonLinearInteractionBlock,
     "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
 }
 
 readout_classes: Dict[str, Type[LinearReadoutBlock]] = {
@@ -116,6 +123,7 @@ __all__ = [
     "AtomicDielectricMACE",
     "EnergyDipolesMACE",
     "MagneticScaleShiftMACE",
+    "MagneticNonSOCScaleShiftMACE",
     "MagneticSCFMACE",
     "PolarMACE",
     "WeightedEnergyForcesLoss",
