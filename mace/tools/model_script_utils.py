@@ -249,9 +249,18 @@ def _build_model(
     args, model_config, model_config_foundation, heads
 ):  # pylint: disable=too-many-return-statements
 
-    if args.model == "MagneticScaleShiftMACE":
+    if args.model in ("MagneticScaleShiftMACE", "MagneticNonSOCScaleShiftMACE"):
         m_max = resolve_m_max(args.m_max, list(model_config["atomic_numbers"]))
-        return modules.MagneticScaleShiftMACE(
+        extra = {}
+        if args.model == "MagneticNonSOCScaleShiftMACE":
+            # Per-layer contraction selection (first layer vs the rest).
+            extra["contraction_cls_first"] = getattr(
+                args, "contraction_cls_first", "SymmetricContraction"
+            )
+            extra["contraction_cls"] = getattr(
+                args, "contraction_cls", "NonSOCSymmetricContraction"
+            )
+        return getattr(modules, args.model)(
             **model_config,
             pair_repulsion=args.pair_repulsion,
             distance_transform=args.distance_transform,
@@ -269,6 +278,7 @@ def _build_model(
             num_mag_radial_basis=args.num_mag_radial_basis,
             num_mag_radial_basis_one_body=args.num_mag_radial_basis_one_body,
             use_magmom_one_body=args.use_magmom_one_body,
+            **extra,
         )
     if args.model == "MACE":
         if args.interaction_first not in [

@@ -145,6 +145,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "AtomicDielectricMACE",
             "EnergyDipolesMACE",
             "MagneticScaleShiftMACE",
+            "MagneticNonSOCScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -213,6 +214,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticResidualNonLinearInteractionBlock",
             "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -228,7 +230,23 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticResidualNonLinearInteractionBlock",
             "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
         ],
+    )
+    parser.add_argument(
+        "--contraction_cls",
+        help="symmetric-contraction class for the (non-first) layers "
+        "(magnetic non-SOC model)",
+        type=str,
+        default="NonSOCSymmetricContraction",
+        choices=["SymmetricContraction", "NonSOCSymmetricContraction"],
+    )
+    parser.add_argument(
+        "--contraction_cls_first",
+        help="symmetric-contraction class for the first layer (magnetic non-SOC model)",
+        type=str,
+        default="SymmetricContraction",
+        choices=["SymmetricContraction", "NonSOCSymmetricContraction"],
     )
     parser.add_argument(
         "--max_ell", help=r"highest \ell of spherical harmonics", type=int, default=3

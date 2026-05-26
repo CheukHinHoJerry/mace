@@ -381,7 +381,7 @@ class NonSOCContraction(torch.nn.Module):
                 irreps_out=irrep_out,
                 correlation=nu,
                 dtype=dtype,
-                use_cueq_cg=False,  # classic CG layout expected by NONSOC_CONTRACTION_EQUATIONS
+                use_cueq_cg=True,
             )[-1]
             self.register_buffer(f"U_matrix_{nu}", U_matrix)
 
@@ -408,7 +408,7 @@ class NonSOCContraction(torch.nn.Module):
                 irreps_out=irrep_out,
                 correlation=nu,
                 dtype=dtype,
-                use_cueq_cg=False,  # classic CG layout expected by NONSOC_CONTRACTION_EQUATIONS
+                use_cueq_cg=True,
             )[-1]
             self.register_buffer(f"U_matrix_magmom_{nu}", U_matrix)
 
@@ -450,9 +450,11 @@ class NonSOCContraction(torch.nn.Module):
             self.weights = weights[:-1]
             self.weights_max = weights[-1]
 
-        # Use the direct-`contract` reference path (forward_reference). The optimized
-        # (opt_einsum_fx) and sparse paths are built lazily only if those forwards are
-        # called; building them eagerly here fails on the pr U_matrix_real layout.
+        # Build the sparse CG path buffers at construction (cheap: just the nonzero
+        # indices of U / U_magmom). forward() uses the sparse path. The opt_einsum_fx
+        # ("optimized") path is left lazy/unused (its eager build assumed the old
+        # U_matrix_real layout).
+        self._ensure_sparse_paths()
 
     # def sparse_contract_nu2(self, U_paths, U_mag_paths, weight, x, y):
     #     idx_U, val_U = U_paths
@@ -723,6 +725,9 @@ class NonSOCContraction(torch.nn.Module):
         return out.view(out.shape[0], -1)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
+        # Direct `opt_einsum.contract` reference path. forward_sparse / forward_optimized
+        # are kept as alternatives and are numerically identical (validated to ~1e-15), but
+        # benchmark showed no speed or memory advantage, so use the clearest path here.
         return self.forward_reference(x, y)
 
     def U_tensors(self, nu: int):
