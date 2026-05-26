@@ -647,3 +647,93 @@ class WeightedEnergyForcesL1L2Loss(torch.nn.Module):
             f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
             f"forces_weight={self.forces_weight:.3f})"
         )
+
+
+class EquivarianceLoss(torch.nn.Module):
+    """Penalizes the model's response to an *independent* rotation of either the
+    positions or the magnetic moments, driving it toward decoupled (non-SOC)
+    behavior: E(Rx, m) = E(x, m) and E(x, Rm) = E(x, m). ``mode`` selects which
+    frame was rotated; the derived quantities transform accordingly:
+
+        mode="spatial" (Rx, m):  E inv,  F -> R F,  magforce inv,  stress -> R s R^T
+        mode="spin"    (x, Rm):  E inv,  F inv,     magforce -> R m_f, stress inv
+
+    The original prediction ``ref_out`` is detached, so the penalty backpropagates
+    only through the rotated forward pass."""
+
+    def __init__(
+        self,
+        energy_weight: float = 1.0,
+        forces_weight: float = 1.0,
+        stress_weight: float = 1.0,
+        magforces_weight: float = 1.0,
+    ) -> None:
+        super().__init__()
+        dt = torch.get_default_dtype()
+        self.register_buffer("energy_weight", torch.tensor(energy_weight, dtype=dt))
+        self.register_buffer("forces_weight", torch.tensor(forces_weight, dtype=dt))
+        self.register_buffer("stress_weight", torch.tensor(stress_weight, dtype=dt))
+        self.register_buffer(
+            "magforces_weight", torch.tensor(magforces_weight, dtype=dt)
+        )
+
+    def forward(
+        self,
+        pred_rot: TensorDict,
+        ref_out: TensorDict,
+        R: torch.Tensor,
+        mode: str,
+        output_args: Optional[dict] = None,
+    ) -> torch.Tensor:
+        output_args = output_args or {}
+        spatial = mode == "spatial"
+        Rt = R.t()
+        loss = pred_rot["energy"].new_zeros(())
+
+        # Energy is invariant under either independent rotation.
+        loss = loss + self.energy_weight * torch.mean(
+            torch.square(pred_rot["energy"] - ref_out["energy"].detach())
+        )
+
+        if (
+            output_args.get("forces", True)
+            and pred_rot.get("forces") is not None
+            and ref_out.get("forces") is not None
+        ):
+            f = ref_out["forces"].detach()
+            f_target = f @ Rt if spatial else f  # equivariant to x-rot, invariant to m-rot
+            loss = loss + self.forces_weight * torch.mean(
+                torch.square(pred_rot["forces"] - f_target)
+            )
+
+        if (
+            output_args.get("magforces", False)
+            and pred_rot.get("magforces") is not None
+            and ref_out.get("magforces") is not None
+        ):
+            mf = ref_out["magforces"].detach()
+            mf_target = mf if spatial else mf @ Rt  # invariant to x-rot, equivariant to m-rot
+            loss = loss + self.magforces_weight * torch.mean(
+                torch.square(pred_rot["magforces"] - mf_target)
+            )
+
+        if (
+            output_args.get("stress", False)
+            and pred_rot.get("stress") is not None
+            and ref_out.get("stress") is not None
+        ):
+            s = ref_out["stress"].detach()  # [n_graphs, 3, 3]
+            s_target = torch.einsum("ab,gbc,dc->gad", R, s, R) if spatial else s
+            loss = loss + self.stress_weight * torch.mean(
+                torch.square(pred_rot["stress"] - s_target)
+            )
+
+        return loss
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
+            f"forces_weight={self.forces_weight:.3f}, "
+            f"stress_weight={self.stress_weight:.3f}, "
+            f"magforces_weight={self.magforces_weight:.3f})"
+        )

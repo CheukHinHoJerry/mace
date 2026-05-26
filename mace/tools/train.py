@@ -180,6 +180,8 @@ def train(
     train_sampler: Optional[DistributedSampler] = None,
     rank: Optional[int] = 0,
     data_aug_magmom: Optional[bool] = False,
+    equivariance_weight: float = 0.0,
+    equivariance_loss_fn: Optional[torch.nn.Module] = None,
 ):
     lowest_loss = np.inf
     valid_loss = np.inf
@@ -212,6 +214,13 @@ def train(
         )
     valid_loss = valid_loss_head  # consider only the last head for the checkpoint
 
+    # Data augmentation on magnetic moments: wrap the loader once (each __getitem__
+    # re-randomizes, so every epoch still sees fresh orientations).
+    if data_aug_magmom:
+        from mace.data import create_random_rotation_loader
+
+        train_loader = create_random_rotation_loader(train_loader)
+
     # variable used for broadcast by rank == 0 if epoch loop is exited early, e.g. patience
     exit_now = torch.zeros(1, device=device) if distributed else None
     while epoch < max_num_epochs:
@@ -238,12 +247,9 @@ def train(
         if "ScheduleFree" in type(optimizer).__name__:
             optimizer.train()
 
-        # allow data augmentation on magnetic moment
-        if data_aug_magmom:
-            from mace.data import create_random_rotation_loader
-
-            train_loader = create_random_rotation_loader(train_loader)
-
+        # Equivariance consistency loss is a Stage Two refinement only; Stage One
+        # stays fast and relies on data augmentation alone.
+        in_stage_two = swa is not None and epoch >= swa.start
         train_one_epoch(
             model=model,
             loss_fn=loss_fn,
@@ -258,6 +264,8 @@ def train(
             distributed=distributed,
             distributed_model=distributed_model,
             rank=rank,
+            equivariance_weight=equivariance_weight if in_stage_two else 0.0,
+            equivariance_loss_fn=equivariance_loss_fn,
         )
         if distributed:
             torch.distributed.barrier()
@@ -376,6 +384,8 @@ def train_one_epoch(
     distributed: bool,
     distributed_model: Optional[DistributedDataParallel] = None,
     rank: Optional[int] = 0,
+    equivariance_weight: float = 0.0,
+    equivariance_loss_fn: Optional[torch.nn.Module] = None,
 ) -> None:
     model_to_train = model if distributed_model is None else distributed_model
 
@@ -397,6 +407,7 @@ def train_one_epoch(
         if rank == 0:
             logger.log(opt_metrics)
     else:
+        equiv_sum, equiv_n = 0.0, 0
         for batch in data_loader:
             _, opt_metrics = take_step(
                 model=model_to_train,
@@ -407,11 +418,21 @@ def train_one_epoch(
                 output_args=output_args,
                 max_grad_norm=max_grad_norm,
                 device=device,
+                equivariance_weight=equivariance_weight,
+                equivariance_loss_fn=equivariance_loss_fn,
+                distributed=distributed,
             )
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
+            if "equivariance_loss" in opt_metrics:
+                equiv_sum += float(opt_metrics["equivariance_loss"])
+                equiv_n += 1
             if rank == 0:
                 logger.log(opt_metrics)
+        if equiv_n > 0 and rank == 0:
+            logging.info(
+                f"Epoch {epoch}: mean equivariance loss = {equiv_sum / equiv_n:.6f}"
+            )
 
 
 def take_step(
@@ -423,48 +444,88 @@ def take_step(
     output_args: Dict[str, bool],
     max_grad_norm: Optional[float],
     device: torch.device,
+    equivariance_weight: float = 0.0,
+    equivariance_loss_fn: Optional[torch.nn.Module] = None,
+    distributed: bool = False,
 ) -> Tuple[float, Dict[str, Any]]:
     start_time = time.time()
     batch = batch.to(device)
     batch_dict = batch.to_dict()
 
-    def closure():
-        optimizer.zero_grad(set_to_none=True)
+    def forward(data):
         if not output_args["magforces"]:
-            output = model(
-                batch_dict,
+            return model(
+                data,
                 training=True,
                 compute_force=output_args["forces"],
                 compute_virials=output_args["virials"],
                 compute_stress=output_args["stress"],
             )
-        else:
-            output = model(
-                batch_dict,
-                training=True,
-                compute_force=output_args["forces"],
-                compute_virials=output_args["virials"],
-                compute_stress=output_args["stress"],
-                compute_magforces=output_args["magforces"],
-            )
+        return model(
+            data,
+            training=True,
+            compute_force=output_args["forces"],
+            compute_virials=output_args["virials"],
+            compute_stress=output_args["stress"],
+            compute_magforces=output_args["magforces"],
+        )
+
+    do_equiv = (
+        equivariance_weight
+        and equivariance_loss_fn is not None
+        and batch_dict.get("magmom") is not None
+    )
+
+    # Under DDP, defer the all-reduce until the final backward of the step so all
+    # passes accumulate locally and synchronize once (gradient-accumulation idiom).
+    def maybe_no_sync(defer):
+        if defer and distributed and hasattr(model, "no_sync"):
+            return model.no_sync()
+        return nullcontext()
+
+    optimizer.zero_grad(set_to_none=True)
+    if do_equiv:
+        # Independent rotations: one of positions only, one of spins only.
+        from mace.data import rotate_batch_dict, sample_rotation_matrix
+
+        R_pos = sample_rotation_matrix(device, batch_dict["positions"].dtype)
+        R_spin = sample_rotation_matrix(device, batch_dict["positions"].dtype)
+        pos_dict = rotate_batch_dict(
+            batch_dict, R_pos, rotate_positions=True, rotate_magmom=False
+        )
+        spin_dict = rotate_batch_dict(
+            batch_dict, R_spin, rotate_positions=False, rotate_magmom=True
+        )
+
+    with maybe_no_sync(do_equiv):
+        output = forward(batch_dict)
         loss = loss_fn(pred=output, ref=batch)
         loss.backward()
-        if max_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
 
-        return loss
+    loss_dict = {"loss": to_numpy(loss)}
+    if do_equiv:
+        with maybe_no_sync(True):  # positions-only pass (spins-only pass still follows)
+            out_pos = forward(pos_dict)
+            equiv_pos = equivariance_weight * equivariance_loss_fn(
+                pred_rot=out_pos, ref_out=output, R=R_pos, mode="spatial",
+                output_args=output_args,
+            )
+            equiv_pos.backward()
+        out_spin = forward(spin_dict)  # final pass triggers the all-reduce
+        equiv_spin = equivariance_weight * equivariance_loss_fn(
+            pred_rot=out_spin, ref_out=output, R=R_spin, mode="spin",
+            output_args=output_args,
+        )
+        equiv_spin.backward()
+        loss_dict["equivariance_loss"] = to_numpy(equiv_pos) + to_numpy(equiv_spin)
 
-    loss = closure()
+    if max_grad_norm is not None:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
     optimizer.step()
-
     if ema is not None:
         ema.update()
 
-    loss_dict = {
-        "loss": to_numpy(loss),
-        "time": time.time() - start_time,
-    }
-
+    loss_dict["time"] = time.time() - start_time
     return loss, loss_dict
 
 

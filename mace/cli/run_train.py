@@ -21,7 +21,7 @@ from torch.utils.data import ConcatDataset
 from torch_ema import ExponentialMovingAverage
 
 import mace
-from mace import data, tools
+from mace import data, modules, tools
 from mace.calculators.foundations_models import (
     mace_mp,
     mace_mp_names,
@@ -757,6 +757,26 @@ def run(args) -> None:
         )
 
     loss_fn = get_loss_fn(args, dipole_only, args.compute_dipole)
+
+    # Optional rotational-equivariance consistency loss (off unless weight > 0).
+    equivariance_loss_fn = None
+    if getattr(args, "equivariance_weight", 0.0) and args.equivariance_weight > 0.0:
+        equivariance_loss_fn = modules.EquivarianceLoss(
+            energy_weight=args.energy_weight,
+            forces_weight=args.forces_weight,
+            stress_weight=args.stress_weight,
+            magforces_weight=getattr(args, "magforces_weight", 1.0),
+        )
+        logging.info(
+            f"Equivariance regularization enabled (Stage Two only): "
+            f"weight={args.equivariance_weight}, {equivariance_loss_fn}"
+        )
+        if not args.swa:
+            logging.warning(
+                "equivariance_weight > 0 but Stage Two (--swa) is disabled, so the "
+                "equivariance loss will never activate."
+            )
+
     args.avg_num_neighbors = get_avg_num_neighbors(head_configs, args, train_loader, device)
 
     # Model
@@ -976,6 +996,8 @@ def run(args) -> None:
         train_sampler=train_sampler,
         rank=rank,
         data_aug_magmom=args.data_aug_magmom,
+        equivariance_weight=getattr(args, "equivariance_weight", 0.0),
+        equivariance_loss_fn=equivariance_loss_fn,
     )
 
     logging.info("")

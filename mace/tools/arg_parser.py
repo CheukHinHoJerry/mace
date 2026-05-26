@@ -872,6 +872,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         dest="swa_stress_weight",
     )
     parser.add_argument(
+        "--equivariance_weight",
+        help=(
+            "weight of the independent-rotation invariance loss. If > 0, each training "
+            "step also runs the model on a copy of the batch with the positions rotated "
+            "alone, and a copy with the magnetic moments rotated alone, penalizing any "
+            "change in the prediction: E(Rx, m) = E(x, m) and E(x, Rm) = E(x, m). This "
+            "drives a SOC model toward decoupled (non-SOC) behavior. 0 disables it."
+        ),
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
         "--dipole_weight", help="weight of dipoles loss", type=float, default=1.0
     )
     parser.add_argument(

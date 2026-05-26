@@ -1,5 +1,9 @@
 from .atomic_data import AtomicData
-from .augmentation import create_random_rotation_loader
+from .augmentation import (
+    create_random_rotation_loader,
+    rotate_batch_dict,
+    sample_rotation_matrix,
+)
 from .hdf5_dataset import HDF5Dataset, dataset_from_sharded_hdf5
 from .lmdb_dataset import LMDBDataset
 from .neighborhood import get_neighborhood
@@ -42,5 +46,7 @@ __all__ = [
     "update_keyspec_from_kwargs",
     "LMDBDataset",
     "create_random_rotation_loader",
+    "rotate_batch_dict",
+    "sample_rotation_matrix",
     "build_fake_padding_graph",
 ]
