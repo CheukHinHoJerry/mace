@@ -1938,14 +1938,9 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
 
         # --- 5. Linear post-processing ---
         self.irreps_out = self.target_irreps
-        self.linear_r = Linear(
-            irreps_r_mid, self.irreps_out,
-            internal_weights=True, shared_weights=True, cueq_config=self.cueq_config,
-        )
-        self.linear_m = Linear(
-            irreps_m_mid, self.irreps_out,
-            internal_weights=True, shared_weights=True, cueq_config=self.cueq_config,
-        )
+        # NOTE: linear_r / linear_m were only used in a commented-out skip connection
+        # below, so they were dead parameters (no gradient) -> broke DDP unless
+        # find_unused_parameters=True. Removed so plain DDP works.
 
         # --- 6. Selector TensorProducts (skip connections) ---
         # self.skip_tp_r = FullyConnectedTensorProduct(
