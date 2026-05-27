@@ -297,7 +297,9 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--hidden_irreps",
-        help="irreps for hidden node states",
+        help="irreps for hidden node states. A single block applies to every layer "
+        "(e.g. '128x0e+128x1o'); '|'-separated blocks set per-layer irreps, one per "
+        "interaction (e.g. '128x0e+128x1o | 64x0e').",
         type=str,
         default=None,
     )

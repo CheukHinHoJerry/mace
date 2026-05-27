@@ -8,7 +8,11 @@ from e3nn import o3
 from mace import modules
 from mace.modules.wrapper_ops import CuEquivarianceConfig
 from mace.tools.finetuning_utils import load_foundations_elements
-from mace.tools.scripts_utils import extract_config_mace_model, resolve_m_max
+from mace.tools.scripts_utils import (
+    extract_config_mace_model,
+    parse_hidden_irreps,
+    resolve_m_max,
+)
 from mace.tools.torch_tools import dtype_dict
 from mace.tools.utils import AtomicNumberTable
 
@@ -110,7 +114,11 @@ def configure_model(
             model_config_foundation["num_elements"] = len(z_table)
             logging.info(f"Using filtered elements: {z_table.zs}")
 
-        args.max_L = model_config_foundation["hidden_irreps"].lmax
+        _found_hidden = model_config_foundation["hidden_irreps"]
+        if isinstance(_found_hidden, (list, tuple)):  # per-layer model
+            args.max_L = max(o3.Irreps(h).lmax for h in _found_hidden)
+        else:
+            args.max_L = _found_hidden.lmax
 
         if args.model in (
             "ScaleShiftMACE",
@@ -165,9 +173,12 @@ def configure_model(
             f"Distance transform for radial basis functions: {args.distance_transform}"
         )
 
-        assert (
-            len({irrep.mul for irrep in o3.Irreps(args.hidden_irreps)}) == 1
-        ), "All channels must have the same dimension, use the num_channels and max_L keywords to specify the number of channels and the maximum L"
+        # Validate each (per-)layer block has a single channel multiplicity.
+        _hidden = parse_hidden_irreps(args.hidden_irreps)
+        for _layer in _hidden if isinstance(_hidden, list) else [_hidden]:
+            assert (
+                len({irrep.mul for irrep in _layer}) == 1
+            ), "All channels must have the same dimension, use the num_channels and max_L keywords to specify the number of channels and the maximum L"
 
         logging.info(f"Hidden irreps: {args.hidden_irreps}")
 
@@ -190,7 +201,7 @@ def configure_model(
             interaction_cls=modules.interaction_classes[args.interaction],
             num_interactions=args.num_interactions,
             num_elements=len(z_table),
-            hidden_irreps=o3.Irreps(args.hidden_irreps),
+            hidden_irreps=parse_hidden_irreps(args.hidden_irreps),
             edge_irreps=o3.Irreps(args.edge_irreps) if args.edge_irreps else None,
             atomic_energies=atomic_energies,
             apply_cutoff=args.apply_cutoff,

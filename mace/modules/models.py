@@ -105,9 +105,27 @@ class MACE(torch.nn.Module):
         self.use_last_readout_only = use_last_readout_only
         self.use_edge_irreps_first = use_edge_irreps_first
 
+        # hidden_irreps may be a single Irreps (uniform across layers, legacy) or a
+        # per-layer list (one Irreps per interaction). Normalize to a list; a single
+        # value expands to [irreps] * num_interactions -> byte-identical to before.
+        # NB: o3.Irreps subclasses tuple, so check it before list/tuple.
+        if isinstance(hidden_irreps, o3.Irreps):
+            hidden_list = [hidden_irreps] * num_interactions
+        elif isinstance(hidden_irreps, (list, tuple)):
+            hidden_list = [o3.Irreps(h) for h in hidden_irreps]
+            assert len(hidden_list) == num_interactions, (
+                f"hidden_irreps list length {len(hidden_list)} must equal "
+                f"num_interactions {num_interactions}"
+            )
+        else:
+            hidden_list = [o3.Irreps(hidden_irreps)] * num_interactions
+        hidden_irreps = hidden_list[0]  # representative for legacy single-value reads
+        self.hidden_irreps_list = hidden_list
+        num_features_list = [h.count(o3.Irrep(0, 1)) for h in hidden_list]
+
         # Embedding
         node_attr_irreps = o3.Irreps([(num_elements, (0, 1))])
-        node_feats_irreps = o3.Irreps([(hidden_irreps.count(o3.Irrep(0, 1)), (0, 1))])
+        node_feats_irreps = o3.Irreps([(num_features_list[0], (0, 1))])
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
             irreps_out=node_feats_irreps,
@@ -146,18 +164,22 @@ class MACE(torch.nn.Module):
             sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
         else:
             sh_irreps = o3.Irreps.spherical_harmonics(max_ell, p=1)
-        num_features = hidden_irreps.count(o3.Irrep(0, 1))
+        num_features = num_features_list[0]  # legacy alias (layer-0 channels)
 
-        # interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
         def generate_irreps(l):
             str_irrep = "+".join([f"1x{i}e+1x{i}o" for i in range(l + 1)])
             return o3.Irreps(str_irrep)
 
-        sh_irreps_inter = sh_irreps
-        if hidden_irreps.count(o3.Irrep(0, -1)) > 0:
-            sh_irreps_inter = generate_irreps(max_ell)
-        interaction_irreps = (sh_irreps_inter * num_features).sort()[0].simplify()
-        interaction_irreps_first = (sh_irreps * num_features).sort()[0].simplify()
+        # Per-layer message-basis irreps: sh (+ odd-parity completion if that layer has
+        # odd scalars) * that layer's channel count.
+        def layer_interaction_irreps(layer):
+            shi = sh_irreps
+            if hidden_list[layer].count(o3.Irrep(0, -1)) > 0:
+                shi = generate_irreps(max_ell)
+            return (shi * num_features_list[layer]).sort()[0].simplify()
+
+        interaction_irreps = layer_interaction_irreps(0)  # legacy alias (layers >0 below)
+        interaction_irreps_first = (sh_irreps * num_features_list[0]).sort()[0].simplify()
 
         self.spherical_harmonics = o3.SphericalHarmonics(
             sh_irreps, normalize=True, normalization="component"
@@ -219,18 +241,19 @@ class MACE(torch.nn.Module):
             )
 
         for i in range(num_interactions - 1):
+            layer = i + 1  # this loop builds interaction/product/readout `layer`
             if i == num_interactions - 2 and not keep_last_layer_irreps:
                 hidden_irreps_out = str(
-                    hidden_irreps[0]
+                    hidden_list[layer][0]
                 )  # Select only scalars for last layer
             else:
-                hidden_irreps_out = hidden_irreps
+                hidden_irreps_out = hidden_list[layer]
             inter = interaction_cls(
                 node_attrs_irreps=node_attr_irreps,
-                node_feats_irreps=hidden_irreps,
+                node_feats_irreps=hidden_list[layer - 1],  # previous layer's output
                 edge_attrs_irreps=sh_irreps,
                 edge_feats_irreps=edge_feats_irreps,
-                target_irreps=interaction_irreps,
+                target_irreps=layer_interaction_irreps(layer),
                 hidden_irreps=hidden_irreps_out,
                 avg_num_neighbors=avg_num_neighbors,
                 edge_irreps=edge_irreps,
@@ -240,9 +263,9 @@ class MACE(torch.nn.Module):
             )
             self.interactions.append(inter)
             prod = EquivariantProductBasisBlock(
-                node_feats_irreps=interaction_irreps,
+                node_feats_irreps=layer_interaction_irreps(layer),
                 target_irreps=hidden_irreps_out,
-                correlation=correlation[i + 1],
+                correlation=correlation[layer],
                 num_elements=num_elements,
                 use_sc=True,
                 cueq_config=cueq_config,
@@ -266,7 +289,7 @@ class MACE(torch.nn.Module):
             elif not use_last_readout_only:
                 self.readouts.append(
                     LinearReadoutBlock(
-                        hidden_irreps,
+                        hidden_irreps_out,
                         o3.Irreps(f"{len(heads)}x0e"),
                         cueq_config,
                         oeq_config,

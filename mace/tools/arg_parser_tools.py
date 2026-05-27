@@ -66,14 +66,15 @@ def check_args(args):
             len({irrep.mul for irrep in o3.Irreps(args.hidden_irreps)}) == 1
         ), "All channels must have the same dimension, use the num_channels and max_L keywords to specify the number of channels and the maximum L"
     elif args.hidden_irreps is not None:
-        assert (
-            len({irrep.mul for irrep in o3.Irreps(args.hidden_irreps)}) == 1
-        ), "All channels must have the same dimension, use the num_channels and max_L keywords to specify the number of channels and the maximum L"
-
-        args.num_channels = list(
-            {irrep.mul for irrep in o3.Irreps(args.hidden_irreps)}
-        )[0]
-        args.max_L = o3.Irreps(args.hidden_irreps).lmax
+        # hidden_irreps may be a single block or "|"-separated per-layer blocks.
+        layers = [o3.Irreps(p.strip()) for p in str(args.hidden_irreps).split("|")]
+        for layer in layers:
+            assert (
+                len({irrep.mul for irrep in layer}) == 1
+            ), "All channels must have the same dimension, use the num_channels and max_L keywords to specify the number of channels and the maximum L"
+        # num_channels/max_L are derived metadata: channels from layer 0, max_L overall.
+        args.num_channels = list({irrep.mul for irrep in layers[0]})[0]
+        args.max_L = max(layer.lmax for layer in layers)
     elif args.max_L is not None and args.num_channels is None:
         assert args.max_L >= 0, "max_L must be non-negative integer"
         args.num_channels = 128

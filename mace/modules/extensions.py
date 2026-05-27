@@ -1155,9 +1155,26 @@ class MagneticMACE(torch.nn.Module):
         self.use_last_readout_only = use_last_readout_only
         self.use_magmom_one_body = use_magmom_one_body
 
+        # hidden_irreps: single Irreps (uniform, legacy) or per-layer list. Normalize to
+        # a list; a single value expands to [irreps]*num_interactions (byte-identical).
+        # NB: o3.Irreps subclasses tuple, so check it before list/tuple.
+        if isinstance(hidden_irreps, o3.Irreps):
+            hidden_list = [hidden_irreps] * num_interactions
+        elif isinstance(hidden_irreps, (list, tuple)):
+            hidden_list = [o3.Irreps(h) for h in hidden_irreps]
+            assert len(hidden_list) == num_interactions, (
+                f"hidden_irreps list length {len(hidden_list)} must equal "
+                f"num_interactions {num_interactions}"
+            )
+        else:
+            hidden_list = [o3.Irreps(hidden_irreps)] * num_interactions
+        hidden_irreps = hidden_list[0]  # representative for legacy single-value reads
+        self.hidden_irreps_list = hidden_list
+        num_features_list = [h.count(o3.Irrep(0, 1)) for h in hidden_list]
+
         # Embedding
         node_attr_irreps = o3.Irreps([(num_elements, (0, 1))])
-        node_feats_irreps = o3.Irreps([(hidden_irreps.count(o3.Irrep(0, 1)), (0, 1))])
+        node_feats_irreps = o3.Irreps([(num_features_list[0], (0, 1))])
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
             irreps_out=node_feats_irreps,
@@ -1193,8 +1210,12 @@ class MagneticMACE(torch.nn.Module):
             self.pair_repulsion = True
 
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
-        num_features = hidden_irreps.count(o3.Irrep(0, 1))
-        interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
+        num_features = num_features_list[0]  # legacy alias (layer-0 channels)
+
+        def layer_interaction_irreps(layer):
+            return (sh_irreps * num_features_list[layer]).sort()[0].simplify()
+
+        interaction_irreps = layer_interaction_irreps(0)  # legacy alias (layers >0 below)
         self.spherical_harmonics = o3.SphericalHarmonics(
             sh_irreps, normalize=True, normalization="component"
         )
@@ -1283,18 +1304,19 @@ class MagneticMACE(torch.nn.Module):
             )
 
         for i in range(num_interactions - 1):
+            layer = i + 1  # this loop builds interaction/product/readout `layer`
             if i == num_interactions - 2:
                 hidden_irreps_out = str(
-                    hidden_irreps[0]
+                    hidden_list[layer][0]
                 )  # Select only scalars for last layer
             else:
-                hidden_irreps_out = hidden_irreps
+                hidden_irreps_out = hidden_list[layer]
             inter = interaction_cls(
                 node_attrs_irreps=node_attr_irreps,
-                node_feats_irreps=hidden_irreps,
+                node_feats_irreps=hidden_list[layer - 1],  # previous layer's output
                 edge_attrs_irreps=sh_irreps,
                 edge_feats_irreps=edge_feats_irreps,
-                target_irreps=interaction_irreps,
+                target_irreps=layer_interaction_irreps(layer),
                 hidden_irreps=hidden_irreps_out,
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
@@ -1307,7 +1329,7 @@ class MagneticMACE(torch.nn.Module):
 
             self.interactions.append(inter)
             prod = EquivariantProductBasisWithSelfMagmomBlock(
-                node_feats_irreps=interaction_irreps,
+                node_feats_irreps=layer_interaction_irreps(layer),
                 target_irreps=hidden_irreps_out,
                 # assume only a single correlation
                 correlation=correlation[i + 1],
@@ -1339,7 +1361,7 @@ class MagneticMACE(torch.nn.Module):
             else:
                 self.readouts.append(
                     readout_cls(
-                        hidden_irreps,
+                        hidden_irreps_out,
                         o3.Irreps(f"{len(heads)}x0e"),
                         cueq_config,
                         oeq_config,
@@ -1640,9 +1662,7 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
     """
 
     def __init__(self, **kwargs):
-        hidden_irreps = kwargs["hidden_irreps"]
-        if not isinstance(hidden_irreps, o3.Irreps):
-            hidden_irreps = o3.Irreps(hidden_irreps)
+        hidden_irreps = kwargs["hidden_irreps"]  # single Irreps or per-layer list
         correlation = kwargs["correlation"]
         first_cls = kwargs["interaction_cls_first"]
         inter_cls = kwargs["interaction_cls"]
@@ -1682,14 +1702,31 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                 cueq_config=getattr(i0, "cueq_config", None),
             )
 
+        # Per-layer hidden irreps (single value -> uniform list; backward compatible).
+        # NB: o3.Irreps subclasses tuple, so check it before list/tuple.
+        if isinstance(hidden_irreps, o3.Irreps):
+            hidden_list = [hidden_irreps] * n
+        elif isinstance(hidden_irreps, (list, tuple)):
+            hidden_list = [o3.Irreps(h) for h in hidden_irreps]
+        else:
+            hidden_list = [o3.Irreps(hidden_irreps)] * n
+
         # Rebuild products per layer with the requested contraction class.
         use_sc_first = "Residual" in str(first_cls)
         products = torch.nn.ModuleList()
         for i, inter in enumerate(self.interactions):
+            # last layer keeps only scalars for the readout
             target_irreps = (
-                o3.Irreps(str(hidden_irreps[0])) if i == n - 1 else hidden_irreps
+                o3.Irreps(str(hidden_list[i][0])) if i == n - 1 else hidden_list[i]
             )
             cc = contraction_cls_first if i == 0 else contraction_cls
+            # The NonSOC contraction emits only invariants, so its layer must be scalar.
+            # (The first layer's plain SymmetricContraction may carry L>0, e.g. 128x0e+128x1o.)
+            if "NonSOC" in str(cc):
+                assert target_irreps.lmax == 0, (
+                    f"layer {i} uses {cc} (invariant) but target_irreps={target_irreps} "
+                    "has lmax>0; non-SOC layers must be Nx0e"
+                )
             products.append(
                 EquivariantProductBasisNonSOCWithSelfMagmomBlock(
                     node_feats_irreps=inter.target_irreps,

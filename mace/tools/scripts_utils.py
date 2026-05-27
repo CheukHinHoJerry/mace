@@ -224,6 +224,33 @@ def print_git_commit():
         return "None"
 
 
+def parse_hidden_irreps(spec):
+    """Normalize a hidden_irreps value into either a single o3.Irreps (uniform across
+    layers, legacy) or a per-layer list of o3.Irreps.
+
+    A "|" separates per-layer blocks, e.g. "128x0e+128x1o | 64x0e" -> two layers.
+    A string / Irreps without "|" returns a single Irreps, so existing usage is
+    byte-identical. Lists are returned element-wise as Irreps.
+    """
+    if isinstance(spec, o3.Irreps):
+        return spec
+    if isinstance(spec, (list, tuple)):
+        return [o3.Irreps(s) for s in spec]
+    parts = [p.strip() for p in str(spec).split("|")]
+    return o3.Irreps(parts[0]) if len(parts) == 1 else [o3.Irreps(p) for p in parts]
+
+
+def _hidden_irreps_for_config(model: torch.nn.Module):
+    """hidden_irreps for extract_config: a per-layer list when the model's layers differ,
+    else a single Irreps (the exact legacy value) for backward compatibility."""
+    legacy = o3.Irreps(str(model.products[0].linear.irreps_out))
+    hidden_list = getattr(model, "hidden_irreps_list", None)
+    if hidden_list is None:
+        return legacy
+    irreps = [o3.Irreps(str(h)) for h in hidden_list]
+    return irreps if any(h != irreps[0] for h in irreps) else legacy
+
+
 def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
     if model.__class__.__name__ not in [
         "ScaleShiftMACE",
@@ -281,7 +308,7 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "interaction_cls_first": model.interactions[0].__class__,
         "num_interactions": model.num_interactions.item(),
         "num_elements": len(model.atomic_numbers),
-        "hidden_irreps": o3.Irreps(str(model.products[0].linear.irreps_out)),
+        "hidden_irreps": _hidden_irreps_for_config(model),
         "edge_irreps": model.edge_irreps if hasattr(model, "edge_irreps") else None,
         "MLP_irreps": o3.Irreps(f"{mlp_scalars_per_head}x0e"),
         "gate": gate,
@@ -523,6 +550,9 @@ def convert_to_json_format(dict_input):
     for key, value in dict_input.items():
         if isinstance(value, (np.ndarray, torch.Tensor)):
             dict_input[key] = value.tolist()
+        # per-layer hidden_irreps -> a "|"-joined string parse_hidden_irreps understands
+        elif key == "hidden_irreps" and isinstance(value, (list, tuple)):
+            dict_input[key] = " | ".join(str(h) for h in value)
         # # check if the value is a class and convert it to a string
         elif hasattr(value, "__class__"):
             dict_input[key] = str(value)
@@ -563,7 +593,7 @@ def convert_from_json_format(dict_input):
     dict_output["max_ell"] = int(dict_input["max_ell"])
     dict_output["num_interactions"] = int(dict_input["num_interactions"])
     dict_output["num_elements"] = int(dict_input["num_elements"])
-    dict_output["hidden_irreps"] = o3.Irreps(dict_input["hidden_irreps"])
+    dict_output["hidden_irreps"] = parse_hidden_irreps(dict_input["hidden_irreps"])
     dict_output["MLP_irreps"] = o3.Irreps(dict_input["MLP_irreps"])
     dict_output["avg_num_neighbors"] = float(dict_input["avg_num_neighbors"])
     dict_output["gate"] = torch.nn.functional.silu
