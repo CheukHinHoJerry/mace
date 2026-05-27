@@ -282,17 +282,18 @@ def _build_model(
         )
         # Node-chunk the non-SOC symmetric contraction to bound its scratch tensor
         # (lower peak memory and, in practice, faster). Numerically identical.
-        chunk = int(getattr(args, "symmetric_contraction_chunk_size", 0) or 0)
-        if chunk > 0:
-            from mace.modules.symmetric_contraction_nonsoc import NonSOCContraction
+        # The arg is authoritative: > 0 enables with that chunk, 0 disables.
+        from mace.modules.symmetric_contraction_nonsoc import NonSOCContraction
 
-            n_set = 0
-            for mod in model.modules():
-                if isinstance(mod, NonSOCContraction):
-                    mod.chunk_size = chunk
-                    n_set += 1
+        chunk = int(getattr(args, "symmetric_contraction_chunk_size", 0) or 0)
+        chunk_val = chunk if chunk > 0 else None
+        contractions = [m for m in model.modules() if isinstance(m, NonSOCContraction)]
+        for mod in contractions:
+            mod.chunk_size = chunk_val
+        if contractions:
             logging.info(
-                f"NonSOC contraction node-chunking: chunk_size={chunk} on {n_set} contraction(s)"
+                f"NonSOC contraction node-chunking: chunk_size={chunk_val} on "
+                f"{len(contractions)} contraction(s)"
             )
         return model
     if args.model == "MACE":

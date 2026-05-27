@@ -48,7 +48,7 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
         shared_weights: Optional[bool] = None,
         num_elements: Optional[int] = None,
         magmom_irreps: Optional[o3.Irreps] = None,
-        chunk_size: Optional[int] = None,
+        chunk_size: Optional[int] = 1000,
     ) -> None:
         super().__init__()
         self.chunk_size = chunk_size
@@ -338,7 +338,7 @@ class NonSOCContraction(torch.nn.Module):
         num_elements: Optional[int] = None,
         weights: Optional[torch.Tensor] = None,
         magmom_irreps: Optional[o3.Irreps] = None,
-        chunk_size: Optional[int] = None,
+        chunk_size: Optional[int] = 1000,
     ) -> None:
         super().__init__()
         self.chunk_size = chunk_size
@@ -735,12 +735,13 @@ class NonSOCContraction(torch.nn.Module):
         # both memory (OOM) and runtime (memory-bandwidth bound). Splitting the nodes
         # into chunks bounds that scratch tensor -- numerically identical, and in
         # practice both lower-memory AND faster. chunk_size=None keeps the original
-        # single-shot path (backward compatible).
-        if self.chunk_size is None or x.shape[0] <= self.chunk_size:
+        # single-shot path. getattr() keeps models pickled before this attr existed working.
+        chunk_size = getattr(self, "chunk_size", None)
+        if chunk_size is None or x.shape[0] <= chunk_size:
             return self.forward_reference(x, y)
         outs = [
-            self.forward_reference(x[i : i + self.chunk_size], y[i : i + self.chunk_size])
-            for i in range(0, x.shape[0], self.chunk_size)
+            self.forward_reference(x[i : i + chunk_size], y[i : i + chunk_size])
+            for i in range(0, x.shape[0], chunk_size)
         ]
         return torch.cat(outs, dim=0)
 

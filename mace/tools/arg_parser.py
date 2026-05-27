@@ -250,11 +250,11 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--symmetric_contraction_chunk_size",
-        help="if > 0, evaluate the non-SOC symmetric contraction in chunks of this many "
-        "nodes to bound its scratch tensor (lower peak memory, often faster; numerically "
-        "identical). 0 = single shot (default).",
+        help="evaluate the non-SOC symmetric contraction in chunks of this many nodes to "
+        "bound its scratch tensor (lower peak memory, often faster; numerically identical). "
+        "0 = single shot. Default 1000.",
         type=int,
-        default=0,
+        default=1000,
     )
     parser.add_argument(
         "--max_ell", help=r"highest \ell of spherical harmonics", type=int, default=3
