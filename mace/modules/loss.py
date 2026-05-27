@@ -684,16 +684,23 @@ class EquivarianceLoss(torch.nn.Module):
         R: torch.Tensor,
         mode: str,
         output_args: Optional[dict] = None,
-    ) -> torch.Tensor:
+        num_atoms: Optional[torch.Tensor] = None,
+    ) -> tuple:
+        """Returns (loss, metrics). ``loss`` is the weighted MSE used for the
+        gradient; ``metrics`` holds per-quantity detached mean-squared errors in
+        base physical units squared (energy per atom if ``num_atoms`` is given),
+        for monitoring the violation independently and with correct units."""
         output_args = output_args or {}
         spatial = mode == "spatial"
         Rt = R.t()
         loss = pred_rot["energy"].new_zeros(())
+        metrics = {}
 
         # Energy is invariant under either independent rotation.
-        loss = loss + self.energy_weight * torch.mean(
-            torch.square(pred_rot["energy"] - ref_out["energy"].detach())
-        )
+        de = pred_rot["energy"] - ref_out["energy"].detach()
+        loss = loss + self.energy_weight * torch.mean(torch.square(de))
+        de_pa = de.detach() / num_atoms if num_atoms is not None else de.detach()
+        metrics["e"] = torch.mean(torch.square(de_pa))  # (eV / atom)^2
 
         if (
             output_args.get("forces", True)
@@ -702,9 +709,9 @@ class EquivarianceLoss(torch.nn.Module):
         ):
             f = ref_out["forces"].detach()
             f_target = f @ Rt if spatial else f  # equivariant to x-rot, invariant to m-rot
-            loss = loss + self.forces_weight * torch.mean(
-                torch.square(pred_rot["forces"] - f_target)
-            )
+            df = pred_rot["forces"] - f_target
+            loss = loss + self.forces_weight * torch.mean(torch.square(df))
+            metrics["f"] = torch.mean(torch.square(df.detach()))  # (eV / A)^2
 
         if (
             output_args.get("magforces", False)
@@ -713,9 +720,9 @@ class EquivarianceLoss(torch.nn.Module):
         ):
             mf = ref_out["magforces"].detach()
             mf_target = mf if spatial else mf @ Rt  # invariant to x-rot, equivariant to m-rot
-            loss = loss + self.magforces_weight * torch.mean(
-                torch.square(pred_rot["magforces"] - mf_target)
-            )
+            dmf = pred_rot["magforces"] - mf_target
+            loss = loss + self.magforces_weight * torch.mean(torch.square(dmf))
+            metrics["mf"] = torch.mean(torch.square(dmf.detach()))  # (eV / mu_B)^2
 
         if (
             output_args.get("stress", False)
@@ -724,11 +731,11 @@ class EquivarianceLoss(torch.nn.Module):
         ):
             s = ref_out["stress"].detach()  # [n_graphs, 3, 3]
             s_target = torch.einsum("ab,gbc,dc->gad", R, s, R) if spatial else s
-            loss = loss + self.stress_weight * torch.mean(
-                torch.square(pred_rot["stress"] - s_target)
-            )
+            ds = pred_rot["stress"] - s_target
+            loss = loss + self.stress_weight * torch.mean(torch.square(ds))
+            metrics["s"] = torch.mean(torch.square(ds.detach()))  # (eV / A^3)^2
 
-        return loss
+        return loss, metrics
 
     def __repr__(self):
         return (

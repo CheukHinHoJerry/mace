@@ -370,6 +370,30 @@ def train(
     logging.info("Training complete")
 
 
+# Per-quantity labels/units for the independent-rotation equivariance monitor.
+# rot-positions: E invariant, F equivariant, magforce invariant, stress equivariant.
+# rot-spins:     E invariant, F invariant,   magforce equivariant, stress invariant.
+_EQUIV_LABELS = {
+    "e": ("dE", "meV/atom"),
+    "f": ("dF", "meV/A"),
+    "mf": ("dMf", "meV/muB"),
+    "s": ("dStress", "meV/A^3"),
+}
+
+
+def log_equivariance_rmse(epoch, equiv_mse_sum, rmse):
+    parts = []
+    for rot, tag in (("rotx", "rot-positions"), ("rotm", "rot-spins")):
+        terms = [
+            f"{lab}={rmse(f'equiv_mse_{q}_{rot}'):.3f} {unit}"
+            for q, (lab, unit) in _EQUIV_LABELS.items()
+            if f"equiv_mse_{q}_{rot}" in equiv_mse_sum
+        ]
+        if terms:
+            parts.append(f"{tag}: " + ", ".join(terms))
+    logging.info(f"Epoch {epoch}: equivariance RMSE | " + " | ".join(parts))
+
+
 def train_one_epoch(
     model: torch.nn.Module,
     loss_fn: torch.nn.Module,
@@ -407,7 +431,8 @@ def train_one_epoch(
         if rank == 0:
             logger.log(opt_metrics)
     else:
-        equiv_sum, equiv_n = 0.0, 0
+        equiv_mse_sum = defaultdict(float)
+        equiv_n = 0
         for batch in data_loader:
             _, opt_metrics = take_step(
                 model=model_to_train,
@@ -425,14 +450,18 @@ def train_one_epoch(
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
             if "equivariance_loss" in opt_metrics:
-                equiv_sum += float(opt_metrics["equivariance_loss"])
                 equiv_n += 1
+                for k, v in opt_metrics.items():
+                    if k.startswith("equiv_mse_"):
+                        equiv_mse_sum[k] += float(v)
             if rank == 0:
                 logger.log(opt_metrics)
         if equiv_n > 0 and rank == 0:
-            logging.info(
-                f"Epoch {epoch}: mean equivariance loss = {equiv_sum / equiv_n:.6f}"
-            )
+            # RMSE per quantity in physical units: sqrt(mean MSE) * 1000 -> milli-units.
+            def rmse(key):
+                return (equiv_mse_sum[key] / equiv_n) ** 0.5 * 1000.0
+
+            log_equivariance_rmse(epoch, equiv_mse_sum, rmse)
 
 
 def take_step(
@@ -504,20 +533,28 @@ def take_step(
 
     loss_dict = {"loss": to_numpy(loss)}
     if do_equiv:
+        num_atoms = batch_dict["ptr"][1:] - batch_dict["ptr"][:-1]
         with maybe_no_sync(True):  # positions-only pass (spins-only pass still follows)
             out_pos = forward(pos_dict)
-            equiv_pos = equivariance_weight * equivariance_loss_fn(
+            l_pos, m_pos = equivariance_loss_fn(
                 pred_rot=out_pos, ref_out=output, R=R_pos, mode="spatial",
-                output_args=output_args,
+                output_args=output_args, num_atoms=num_atoms,
             )
+            equiv_pos = equivariance_weight * l_pos
             equiv_pos.backward()
         out_spin = forward(spin_dict)  # final pass triggers the all-reduce
-        equiv_spin = equivariance_weight * equivariance_loss_fn(
+        l_spin, m_spin = equivariance_loss_fn(
             pred_rot=out_spin, ref_out=output, R=R_spin, mode="spin",
-            output_args=output_args,
+            output_args=output_args, num_atoms=num_atoms,
         )
+        equiv_spin = equivariance_weight * l_spin
         equiv_spin.backward()
         loss_dict["equivariance_loss"] = to_numpy(equiv_pos) + to_numpy(equiv_spin)
+        # Per-quantity mean-squared errors (base units^2) for monitoring with units.
+        for q, v in m_pos.items():
+            loss_dict[f"equiv_mse_{q}_rotx"] = to_numpy(v)
+        for q, v in m_spin.items():
+            loss_dict[f"equiv_mse_{q}_rotm"] = to_numpy(v)
 
     if max_grad_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
