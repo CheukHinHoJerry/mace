@@ -48,8 +48,10 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
         shared_weights: Optional[bool] = None,
         num_elements: Optional[int] = None,
         magmom_irreps: Optional[o3.Irreps] = None,
+        chunk_size: Optional[int] = None,
     ) -> None:
         super().__init__()
+        self.chunk_size = chunk_size
 
         if irrep_normalization is None:
             irrep_normalization = "component"
@@ -98,6 +100,7 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
                     num_elements=num_elements,
                     weights=self.shared_weights,
                     magmom_irreps=self.magmom_irreps,
+                    chunk_size=self.chunk_size,
                 )
             )
 
@@ -335,8 +338,10 @@ class NonSOCContraction(torch.nn.Module):
         num_elements: Optional[int] = None,
         weights: Optional[torch.Tensor] = None,
         magmom_irreps: Optional[o3.Irreps] = None,
+        chunk_size: Optional[int] = None,
     ) -> None:
         super().__init__()
+        self.chunk_size = chunk_size
 
         # In the non-SOC A-tensor path, einsum index 'a' is the channel multiplicity
         # (mul axis after reshape), not total irreps count.
@@ -725,10 +730,19 @@ class NonSOCContraction(torch.nn.Module):
         return out.view(out.shape[0], -1)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        # Direct `opt_einsum.contract` reference path. forward_sparse / forward_optimized
-        # are kept as alternatives and are numerically identical (validated to ~1e-15), but
-        # benchmark showed no speed or memory advantage, so use the clearest path here.
-        return self.forward_reference(x, y)
+        # The reference contraction materializes a (spatial)^nu x (magmom)^nu scratch
+        # tensor whose size scales with the node count; at large batches it dominates
+        # both memory (OOM) and runtime (memory-bandwidth bound). Splitting the nodes
+        # into chunks bounds that scratch tensor -- numerically identical, and in
+        # practice both lower-memory AND faster. chunk_size=None keeps the original
+        # single-shot path (backward compatible).
+        if self.chunk_size is None or x.shape[0] <= self.chunk_size:
+            return self.forward_reference(x, y)
+        outs = [
+            self.forward_reference(x[i : i + self.chunk_size], y[i : i + self.chunk_size])
+            for i in range(0, x.shape[0], self.chunk_size)
+        ]
+        return torch.cat(outs, dim=0)
 
     def U_tensors(self, nu: int):
         return dict(self.named_buffers())[f"U_matrix_{nu}"]

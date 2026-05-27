@@ -260,7 +260,7 @@ def _build_model(
             extra["contraction_cls"] = getattr(
                 args, "contraction_cls", "NonSOCSymmetricContraction"
             )
-        return getattr(modules, args.model)(
+        model = getattr(modules, args.model)(
             **model_config,
             pair_repulsion=args.pair_repulsion,
             distance_transform=args.distance_transform,
@@ -280,6 +280,21 @@ def _build_model(
             use_magmom_one_body=args.use_magmom_one_body,
             **extra,
         )
+        # Node-chunk the non-SOC symmetric contraction to bound its scratch tensor
+        # (lower peak memory and, in practice, faster). Numerically identical.
+        chunk = int(getattr(args, "symmetric_contraction_chunk_size", 0) or 0)
+        if chunk > 0:
+            from mace.modules.symmetric_contraction_nonsoc import NonSOCContraction
+
+            n_set = 0
+            for mod in model.modules():
+                if isinstance(mod, NonSOCContraction):
+                    mod.chunk_size = chunk
+                    n_set += 1
+            logging.info(
+                f"NonSOC contraction node-chunking: chunk_size={chunk} on {n_set} contraction(s)"
+            )
+        return model
     if args.model == "MACE":
         if args.interaction_first not in [
             "RealAgnosticInteractionBlock",
