@@ -48,7 +48,7 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
         shared_weights: Optional[bool] = None,
         num_elements: Optional[int] = None,
         magmom_irreps: Optional[o3.Irreps] = None,
-        chunk_size: Optional[int] = 1000,
+        chunk_size: Optional[int] = 250,
     ) -> None:
         super().__init__()
         self.chunk_size = chunk_size
@@ -338,7 +338,7 @@ class NonSOCContraction(torch.nn.Module):
         num_elements: Optional[int] = None,
         weights: Optional[torch.Tensor] = None,
         magmom_irreps: Optional[o3.Irreps] = None,
-        chunk_size: Optional[int] = 1000,
+        chunk_size: Optional[int] = 250,
     ) -> None:
         super().__init__()
         self.chunk_size = chunk_size
