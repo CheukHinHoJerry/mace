@@ -7,7 +7,7 @@ from e3nn import o3
 
 from mace import modules
 from mace.modules.wrapper_ops import CuEquivarianceConfig
-from mace.tools.finetuning_utils import load_foundations_elements
+from mace.tools.finetuning_utils import load_foundations, load_foundations_elements
 from mace.tools.scripts_utils import (
     extract_config_mace_model,
     parse_hidden_irreps,
@@ -217,14 +217,26 @@ def configure_model(
     model = _build_model(args, model_config, model_config_foundation, heads)
 
     if model_foundation is not None:
-        model = load_foundations_elements(
-            model,
-            model_foundation,
-            z_table,
-            load_readout=args.foundation_filter_elements,
-            max_L=args.max_L,
-            default_dtype=dtype_dict.get(args.default_dtype, torch.float64),
-        )
+        # load_foundations_elements is hard-coded for the standard MACE blocks
+        # (interaction.conv_tp_weights, standard product symmetric_contractions). Magnetic
+        # models use different blocks (conv_tp_r/m_weights, NonSOC products), so for them
+        # do a generic state_dict transfer of matching params (skip readouts -> per-head).
+        is_magnetic = "Magnetic" in model.__class__.__name__
+        if not is_magnetic:
+            model = load_foundations_elements(
+                model,
+                model_foundation,
+                z_table,
+                load_readout=args.foundation_filter_elements,
+                max_L=args.max_L,
+                default_dtype=dtype_dict.get(args.default_dtype, torch.float64),
+            )
+        else:
+            logging.info(
+                "Foundation model has non-standard (e.g. magnetic) interaction blocks; "
+                "using generic name+shape state_dict transfer (readouts re-initialised)."
+            )
+            model = load_foundations(model, model_foundation, include_readouts=False)
 
     return model, output_args
 
