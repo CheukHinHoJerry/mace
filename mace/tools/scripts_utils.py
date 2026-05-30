@@ -401,6 +401,13 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         ).copy()
         config["field_readout_config"] = getattr(model, "_field_readout_config").copy()
         config["keep_last_layer_irreps"] = model.keep_last_layer_irreps
+        # per-atom magnetic-moment initialization (getattr defaults keep pre-change
+        # PolarMACE checkpoints extractable / rebuildable)
+        config["spin_init_mode"] = getattr(model, "spin_init_mode", "none")
+        config["spin_init_key"] = getattr(model, "spin_init_key", "magmom")
+        config["spin_init_component"] = getattr(model, "spin_init_component", "z")
+        config["spin_init_dropout"] = getattr(model, "spin_init_dropout", 0.0)
+        config["spin_init_noise"] = getattr(model, "spin_init_noise", 0.0)
     return config
 
 

@@ -426,6 +426,41 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        "--spin_init_mode",
+        help="PolarMACE per-atom magnetic-moment initialization: 'none' (default, unchanged), "
+        "'seed' (seed the spin density from the input moment), or 'condition' (seed + a "
+        "zero-init embedding of the seed feeding the fixed-point update; requires retraining)",
+        type=str,
+        default="none",
+        choices=["none", "seed", "condition"],
+    )
+    parser.add_argument(
+        "--spin_init_key",
+        help="batch-dict key for the per-atom moment used by PolarMACE spin_init_mode",
+        type=str,
+        default="magmom",
+    )
+    parser.add_argument(
+        "--spin_init_component",
+        help="collinear reduction of the 3-vector seed moment for PolarMACE",
+        type=str,
+        default="z",
+        choices=["z", "signed_norm"],
+    )
+    parser.add_argument(
+        "--spin_init_dropout",
+        help="per-structure dropout of the PolarMACE moment seed during training "
+        "(learn preserve-or-relax, not copy)",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--spin_init_noise",
+        help="Gaussian noise std added to the PolarMACE moment seed during training",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
         "--scaling",
         help="type of scaling to the output",
         type=str,

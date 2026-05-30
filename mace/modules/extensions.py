@@ -342,6 +342,11 @@ class PolarMACE(ScaleShiftMACE):
         field_norm_factor: Optional[float] = 0.02,
         fixedpoint_update_config: Optional[Dict[str, Any]] = None,
         field_readout_config: Optional[Dict[str, Any]] = None,
+        spin_init_mode: str = "none",
+        spin_init_key: str = "magmom",
+        spin_init_component: str = "z",
+        spin_init_dropout: float = 0.0,
+        spin_init_noise: float = 0.0,
         **kwargs,
     ):
         if not GRAPH_LONGRANGE_AVAILABLE:
@@ -609,6 +614,88 @@ class PolarMACE(ScaleShiftMACE):
             cueq_config=cueq_config,
         )
 
+        # --- optional per-atom magnetic-moment initialization ---------------------------
+        # When spin_init_mode != "none", the per-atom input moment data[spin_init_key]
+        # (a 3-vector) is reduced to a collinear scalar, normalized per structure so its sum
+        # matches the global fukui target (total_spin - 1), and used to SEED the spin density.
+        # In "condition" mode an additional zero-initialised embedding of that seed is added to
+        # the node features that feed the fixed-point update (so a trained model can learn to
+        # read the requested texture; zero-init => an untrained build is unchanged). Default
+        # "none" => none of this runs and the model is bit-identical to before. See
+        # magmace-examples/docs/polarmace_magmom_init.md.
+        assert spin_init_mode in ("none", "seed", "condition")
+        assert spin_init_component in ("z", "signed_norm")
+        self.spin_init_mode = str(spin_init_mode)
+        self.spin_init_key = str(spin_init_key)
+        self.spin_init_component = str(spin_init_component)
+        self.spin_init_dropout = float(spin_init_dropout)
+        self.spin_init_noise = float(spin_init_noise)
+        # 0e (scalar) block bounds within hidden_irreps; layout-invariant for l=0 (each scalar
+        # has dim 1, so mul_ir vs ir_mul do not reorder within the block).
+        scalar_start, scalar_stop, num_scalar, num_zero_e_groups = 0, 0, 0, 0
+        off = 0
+        for mul, ir in hidden_irreps:
+            dim = mul * ir.dim
+            if ir.l == 0 and ir.p == 1:
+                num_zero_e_groups += 1
+                if num_scalar == 0:
+                    scalar_start, scalar_stop, num_scalar = off, off + dim, mul
+            off += dim
+        self._spin_cond_start = int(scalar_start)
+        self._spin_cond_stop = int(scalar_stop)
+        # Define spin_init_cond for ALL modes (Identity carries no params, so none/seed/legacy
+        # checkpoints keep identical state_dicts) so TorchScript can compile the forward
+        # reference even when the condition branch is never taken; swap in a zero-init linear
+        # embedding only in condition mode.
+        self.spin_init_cond = torch.nn.Identity()
+        if self.spin_init_mode == "condition":
+            assert num_scalar > 0, "condition mode needs scalar (0e) channels in hidden_irreps"
+            assert (
+                num_zero_e_groups == 1
+            ), "condition mode expects a single contiguous 0e block in hidden_irreps"
+            lin = o3.Linear(o3.Irreps("1x0e"), o3.Irreps(f"{num_scalar}x0e"))
+            for p in lin.parameters():
+                torch.nn.init.zeros_(p)
+            self.spin_init_cond = lin
+
+    def _compute_spin_seed(
+        self, data: Dict[str, torch.Tensor], num_graphs: int, dtype: torch.dtype, training: bool
+    ) -> Optional[torch.Tensor]:
+        """Per-atom scalar seed m0, normalized so sum_i m0_i == total_spin - 1 per structure.
+
+        Returns None if no initialization is requested or no moment is supplied (=> the model
+        falls back to its zero-init behaviour for that batch).
+        """
+        if self.spin_init_mode == "none":
+            return None
+        m_vec = data.get(self.spin_init_key, None)
+        if m_vec is None:
+            return None
+        if self.spin_init_component == "signed_norm":
+            m_raw = torch.sign(m_vec[:, 2]) * torch.linalg.norm(m_vec, dim=-1)
+        else:  # "z" component (collinear convention)
+            m_raw = m_vec[:, 2]
+        m_raw = m_raw.to(dtype)
+        batch = data["batch"]
+        # Train-time augmentation is applied BEFORE normalization so the normalized seed still
+        # sums to the global target: a dropped structure -> uniform target/N seed (magnitude
+        # kept, texture removed); added noise becomes zero-sum after the residual subtraction.
+        if training and self.spin_init_dropout > 0.0:
+            keep = (
+                torch.rand(num_graphs, device=m_raw.device) >= self.spin_init_dropout
+            ).to(dtype)
+            m_raw = m_raw * keep[batch]
+        if training and self.spin_init_noise > 0.0:
+            m_raw = m_raw + self.spin_init_noise * torch.randn_like(m_raw)
+        # residual-subtraction normalization: sum_i m0_i == total_spin - 1 per structure
+        # (identity when the input already sums to the target).
+        target = data["total_spin"].to(dtype) - 1.0  # [num_graphs]
+        sum_m = scatter_sum(m_raw, batch, dim=0, dim_size=num_graphs)
+        n_at = scatter_sum(torch.ones_like(m_raw), batch, dim=0, dim_size=num_graphs)
+        corr = ((sum_m - target) / n_at.clamp_min(1.0))[batch]
+        m0 = m_raw - corr
+        return m0
+
     def forward(
         self,
         data: Dict[str, torch.Tensor],
@@ -660,6 +747,9 @@ class PolarMACE(ScaleShiftMACE):
         )
         charges_to_mul_ir = getattr(self, "_charges_to_mul_ir", None)
 
+        # optional per-atom magnetic-moment seed (None unless spin_init_mode != "none")
+        spin_seed = self._compute_spin_seed(data, num_graphs, vectors.dtype, training)
+
         node_e0 = self.atomic_energies_fn(data["node_attrs"])[
             num_atoms_arange, node_heads
         ]
@@ -688,6 +778,14 @@ class PolarMACE(ScaleShiftMACE):
             device=data["batch"].device,
             dtype=vectors.dtype,
         )
+        if spin_seed is not None:
+            # seed the l=0 spin component: alpha += m0/2, beta -= m0/2 (charge-neutral per
+            # atom, so alpha-beta == m0). The source maps below then add their learned
+            # correction on top of this seed.
+            scd = spin_charge_density.view(spin_charge_density.shape[0], 2, -1).clone()
+            scd[:, 0, 0] = scd[:, 0, 0] + 0.5 * spin_seed
+            scd[:, 1, 0] = scd[:, 1, 0] - 0.5 * spin_seed
+            spin_charge_density = scd.view(spin_charge_density.shape[0], -1)
 
         for i, (interaction, product, lr_src) in enumerate(
             zip(self.interactions, self.products, self.lr_source_maps)
@@ -751,6 +849,16 @@ class PolarMACE(ScaleShiftMACE):
 
         # SCF fixed point
         features_mixed = self.layer_feature_mixer(torch.stack(node_feats_list, dim=0))
+        if self.spin_init_mode == "condition" and spin_seed is not None:
+            # add a zero-initialised embedding of the seed into the 0e (scalar) channels of the
+            # features that drive the fixed-point update, so the trained model can read the
+            # requested texture. The scalar block is layout-invariant, so a plain slice is safe.
+            cond = self.spin_init_cond(spin_seed.unsqueeze(-1))  # [n_nodes, num_scalar]
+            fm = features_mixed.clone()
+            fm[:, self._spin_cond_start : self._spin_cond_stop] = (
+                fm[:, self._spin_cond_start : self._spin_cond_stop] + cond
+            )
+            features_mixed = fm
         spin_charge_density = spin_charge_density.view(
             spin_charge_density.shape[0], 2, -1
         )
@@ -1004,6 +1112,7 @@ class PolarMACE(ScaleShiftMACE):
             "electron_energy": le_total,
             "electrostatic_potentials": esps,
             "spin_charge_density": spin_charge_density_mul_ir,
+            "init_magmom": spin_seed,
         }
 
 

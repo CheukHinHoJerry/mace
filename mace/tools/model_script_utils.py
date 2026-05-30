@@ -403,6 +403,11 @@ def _build_model(
             field_norm_factor=args.field_norm_factor,
             fixedpoint_update_config=fixedpoint_update_config,
             field_readout_config=field_readout_config,
+            spin_init_mode=args.spin_init_mode,
+            spin_init_key=args.spin_init_key,
+            spin_init_component=args.spin_init_component,
+            spin_init_dropout=args.spin_init_dropout,
+            spin_init_noise=args.spin_init_noise,
         )
     if args.model == "FoundationMACE":
         return modules.ScaleShiftMACE(**model_config_foundation)
