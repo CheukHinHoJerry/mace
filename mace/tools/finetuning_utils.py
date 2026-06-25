@@ -507,6 +507,11 @@ def transfer_foundation_readouts_and_scale_shift(
         and model_foundations.scale_shift is not None
     ):
         n_heads = len(model_heads)
+        pt_head_idx = (
+            model_heads.index("pt_head")
+            if (n_heads > 1 and "pt_head" in model_heads)
+            else None
+        )
         if use_scale:
             target = model.scale_shift.scale
             new = model_foundations.scale_shift.scale.repeat(n_heads).clone()
@@ -514,11 +519,20 @@ def transfer_foundation_readouts_and_scale_shift(
             if new.shape == target.shape:
                 model.scale_shift.scale = new
         if use_shift:
-            target = model.scale_shift.shift
-            new = model_foundations.scale_shift.shift.repeat(n_heads).clone()
-            new = new.to(dtype=target.dtype, device=target.device)
-            if new.shape == target.shape:
-                model.scale_shift.shift = new
+            if pt_head_idx is not None:
+                target = model.scale_shift.shift
+                src = (
+                    model_foundations.scale_shift.shift.flatten()[0]
+                    .to(dtype=target.dtype, device=target.device)
+                )
+                if target.ndim == 1 and target.shape[0] == n_heads:
+                    target[pt_head_idx] = src
+            else:
+                target = model.scale_shift.shift
+                new = model_foundations.scale_shift.shift.repeat(n_heads).clone()
+                new = new.to(dtype=target.dtype, device=target.device)
+                if new.shape == target.shape:
+                    model.scale_shift.shift = new
 
     # Broadcast any remaining foundation buffer/parameter whose model
     # counterpart differs only in a singleton head dim. Catches the
@@ -531,7 +545,10 @@ def transfer_foundation_readouts_and_scale_shift(
     n_heads = len(model_heads)
     if n_heads > 1:
         import logging as _logging
-        skip_names = {"atomic_energies_fn.atomic_energies"}
+        skip_names = {
+            "atomic_energies_fn.atomic_energies",
+            "scale_shift.shift",
+        }
         model_state = model.state_dict()
         foundation_state = model_foundations.state_dict()
         n_broadcast = 0
