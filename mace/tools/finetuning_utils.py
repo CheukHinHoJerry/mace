@@ -370,3 +370,145 @@ def load_foundations(
             continue
         model_state[name].copy_(param)
     return model
+
+
+def transfer_foundation_readouts_and_scale_shift(
+    model,
+    model_foundations,
+    load_readout: bool = True,
+    use_shift: bool = True,
+    use_scale: bool = True,
+):
+    """Broadcast a foundation's single-head readouts and scale_shift to all
+    heads of a (potentially multi-head) fine-tuning model. Same algebra as
+    the readout / scale_shift sections of ``load_foundations_elements``, but
+    without the interaction / product element-filter machinery -- so it
+    works for magnetic models where the standard ``load_foundations_elements``
+    cannot run.
+    """
+    z_table = AtomicNumberTable([int(z) for z in model_foundations.atomic_numbers])
+    model_heads = model.heads
+    num_species_foundations = len(z_table.zs)
+    num_channels_foundation = (
+        model_foundations.node_embedding.linear.weight.shape[0]
+        // num_species_foundations
+    )
+
+    if load_readout:
+        for i, readout in enumerate(model.readouts):
+            cls = readout.__class__.__name__
+            if cls == "LinearReadoutBlock":
+                w = (
+                    model_foundations.readouts[i]
+                    .linear.weight.view(num_channels_foundation, -1)
+                    .repeat(1, len(model_heads))
+                    .flatten()
+                    .clone()
+                )
+                readout.linear.weight = torch.nn.Parameter(w)
+
+            elif cls in ("NonLinearBiasReadoutBlock", "NonLinearReadoutBlock"):
+                assert hasattr(readout, "linear_1"), "expected linear_1 on readout"
+                shape_input_1 = (
+                    model_foundations.readouts[i]
+                    .linear_1.__dict__["irreps_out"].num_irreps
+                )
+                shape_output_1 = readout.linear_1.__dict__["irreps_out"].num_irreps
+
+                w1 = (
+                    model_foundations.readouts[i]
+                    .linear_1.weight.view(num_channels_foundation, -1)
+                    .repeat(1, len(model_heads))
+                    .flatten()
+                    .clone()
+                )
+                readout.linear_1.weight = torch.nn.Parameter(w1)
+
+                if (
+                    readout.linear_1.bias is not None
+                    and readout.linear_1.bias.numel() > 0
+                ):
+                    b1 = (
+                        model_foundations.readouts[i]
+                        .linear_1.bias.view(-1)
+                        .repeat(len(model_heads))
+                        .clone()
+                    )
+                    readout.linear_1.bias = torch.nn.Parameter(b1)
+
+                if hasattr(readout, "linear_2"):
+                    w2 = (
+                        model_foundations.readouts[i]
+                        .linear_2.weight.view(shape_input_1, -1)
+                        .repeat(len(model_heads), len(model_heads))
+                        .flatten()
+                        .clone()
+                        / ((shape_input_1) / (shape_output_1)) ** 0.5
+                    )
+                    readout.linear_2.weight = torch.nn.Parameter(w2)
+                    if (
+                        readout.linear_2.bias is not None
+                        and readout.linear_2.bias.numel() > 0
+                    ):
+                        b2 = (
+                            model_foundations.readouts[i]
+                            .linear_2.bias.view(-1)
+                            .repeat(len(model_heads))
+                            .flatten()
+                            .clone()
+                        )
+                        readout.linear_2.bias = torch.nn.Parameter(b2)
+
+    if (
+        hasattr(model, "scale_shift")
+        and model.scale_shift is not None
+        and hasattr(model_foundations, "scale_shift")
+        and model_foundations.scale_shift is not None
+    ):
+        if use_scale:
+            model.scale_shift.scale = (
+                model_foundations.scale_shift.scale.repeat(len(model_heads)).clone()
+            )
+        if use_shift:
+            model.scale_shift.shift = (
+                model_foundations.scale_shift.shift.repeat(len(model_heads)).clone()
+            )
+
+    # Broadcast any remaining foundation buffer/parameter whose model
+    # counterpart differs only in a singleton head dim. Catches the
+    # magnetic per-head buffers (onebody_magmombasis_coeffs,
+    # one_body_magmom_const_correction, atomic_energies_fn.atomic_energies,
+    # readouts.*.output_mask, ...) that load_foundations skipped on shape
+    # mismatch. Requires the new model to use the foundation's full
+    # atomic-number table (--foundation_model_elements=True); otherwise the
+    # element dim also differs and the broadcast is skipped.
+    n_heads = len(model_heads)
+    if n_heads > 1:
+        import logging as _logging
+        model_state = model.state_dict()
+        foundation_state = model_foundations.state_dict()
+        n_broadcast = 0
+        for name, fparam in foundation_state.items():
+            if name not in model_state:
+                continue
+            mparam = model_state[name]
+            if mparam.shape == fparam.shape:
+                continue
+            if fparam.ndim != mparam.ndim:
+                continue
+            diff_dims = [
+                i for i in range(fparam.ndim) if fparam.shape[i] != mparam.shape[i]
+            ]
+            if len(diff_dims) != 1:
+                continue
+            d = diff_dims[0]
+            if fparam.shape[d] != 1 or mparam.shape[d] != n_heads:
+                continue
+            mparam.copy_(fparam.expand_as(mparam).clone())
+            n_broadcast += 1
+        _logging.info(
+            f"[magnetic foundation transfer] broadcast head-dim "
+            f"({n_heads}) for {n_broadcast} foundation tensors."
+        )
+
+    return model
