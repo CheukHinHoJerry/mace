@@ -436,6 +436,25 @@ def transfer_foundation_readouts_and_scale_shift(
                     )
                     readout.linear_1.bias = torch.nn.Parameter(b1)
 
+                if hasattr(readout, "linear_mid"):
+                    readout.linear_mid.weight = torch.nn.Parameter(
+                        model_foundations.readouts[i]
+                        .linear_mid.weight.view(shape_input_1, shape_input_1)
+                        .repeat(len(model_heads), len(model_heads))
+                        .flatten()
+                        .clone()
+                        / ((shape_input_1) / (shape_output_1)) ** 0.5
+                    )
+                    if (
+                        readout.linear_mid.bias is not None
+                        and readout.linear_mid.bias.numel() > 0
+                    ):
+                        readout.linear_mid.bias = torch.nn.Parameter(
+                            model_foundations.readouts[i]
+                            .linear_mid.bias.repeat(len(model_heads))
+                            .clone()
+                        )
+
                 if hasattr(readout, "linear_2"):
                     w2 = (
                         model_foundations.readouts[i]
