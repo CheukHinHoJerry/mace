@@ -394,6 +394,26 @@ def transfer_foundation_readouts_and_scale_shift(
         // num_species_foundations
     )
 
+    def _assign_param_safe(module, attr_name, new_tensor, ctx):
+        """Replace ``module.<attr_name>`` with a Parameter built from
+        ``new_tensor``, but first match the target's shape, dtype, and device.
+        Skip with a warning if the shape doesn't match -- safer than letting
+        forward blow up downstream.
+        """
+        import logging as _logging
+        existing = getattr(module, attr_name)
+        if existing is None:
+            return
+        if existing.shape != new_tensor.shape:
+            _logging.warning(
+                f"[magnetic foundation transfer] {ctx}: shape mismatch "
+                f"{tuple(new_tensor.shape)} vs target {tuple(existing.shape)}, "
+                "leaving the target parameter unchanged."
+            )
+            return
+        new_tensor = new_tensor.to(dtype=existing.dtype, device=existing.device)
+        setattr(module, attr_name, torch.nn.Parameter(new_tensor))
+
     if load_readout:
         for i, readout in enumerate(model.readouts):
             cls = readout.__class__.__name__
@@ -405,7 +425,7 @@ def transfer_foundation_readouts_and_scale_shift(
                     .flatten()
                     .clone()
                 )
-                readout.linear.weight = torch.nn.Parameter(w)
+                _assign_param_safe(readout.linear, "weight", w, f"readouts.{i}.linear.weight")
 
             elif cls in ("NonLinearBiasReadoutBlock", "NonLinearReadoutBlock"):
                 assert hasattr(readout, "linear_1"), "expected linear_1 on readout"
@@ -422,7 +442,7 @@ def transfer_foundation_readouts_and_scale_shift(
                     .flatten()
                     .clone()
                 )
-                readout.linear_1.weight = torch.nn.Parameter(w1)
+                _assign_param_safe(readout.linear_1, "weight", w1, f"readouts.{i}.linear_1.weight")
 
                 if (
                     readout.linear_1.bias is not None
@@ -434,10 +454,10 @@ def transfer_foundation_readouts_and_scale_shift(
                         .repeat(len(model_heads))
                         .clone()
                     )
-                    readout.linear_1.bias = torch.nn.Parameter(b1)
+                    _assign_param_safe(readout.linear_1, "bias", b1, f"readouts.{i}.linear_1.bias")
 
                 if hasattr(readout, "linear_mid"):
-                    readout.linear_mid.weight = torch.nn.Parameter(
+                    w_mid = (
                         model_foundations.readouts[i]
                         .linear_mid.weight.view(shape_input_1, shape_input_1)
                         .repeat(len(model_heads), len(model_heads))
@@ -445,15 +465,17 @@ def transfer_foundation_readouts_and_scale_shift(
                         .clone()
                         / ((shape_input_1) / (shape_output_1)) ** 0.5
                     )
+                    _assign_param_safe(readout.linear_mid, "weight", w_mid, f"readouts.{i}.linear_mid.weight")
                     if (
                         readout.linear_mid.bias is not None
                         and readout.linear_mid.bias.numel() > 0
                     ):
-                        readout.linear_mid.bias = torch.nn.Parameter(
+                        b_mid = (
                             model_foundations.readouts[i]
                             .linear_mid.bias.repeat(len(model_heads))
                             .clone()
                         )
+                        _assign_param_safe(readout.linear_mid, "bias", b_mid, f"readouts.{i}.linear_mid.bias")
 
                 if hasattr(readout, "linear_2"):
                     w2 = (
@@ -464,7 +486,7 @@ def transfer_foundation_readouts_and_scale_shift(
                         .clone()
                         / ((shape_input_1) / (shape_output_1)) ** 0.5
                     )
-                    readout.linear_2.weight = torch.nn.Parameter(w2)
+                    _assign_param_safe(readout.linear_2, "weight", w2, f"readouts.{i}.linear_2.weight")
                     if (
                         readout.linear_2.bias is not None
                         and readout.linear_2.bias.numel() > 0
@@ -476,7 +498,7 @@ def transfer_foundation_readouts_and_scale_shift(
                             .flatten()
                             .clone()
                         )
-                        readout.linear_2.bias = torch.nn.Parameter(b2)
+                        _assign_param_safe(readout.linear_2, "bias", b2, f"readouts.{i}.linear_2.bias")
 
     if (
         hasattr(model, "scale_shift")
@@ -484,14 +506,19 @@ def transfer_foundation_readouts_and_scale_shift(
         and hasattr(model_foundations, "scale_shift")
         and model_foundations.scale_shift is not None
     ):
+        n_heads = len(model_heads)
         if use_scale:
-            model.scale_shift.scale = (
-                model_foundations.scale_shift.scale.repeat(len(model_heads)).clone()
-            )
+            target = model.scale_shift.scale
+            new = model_foundations.scale_shift.scale.repeat(n_heads).clone()
+            new = new.to(dtype=target.dtype, device=target.device)
+            if new.shape == target.shape:
+                model.scale_shift.scale = new
         if use_shift:
-            model.scale_shift.shift = (
-                model_foundations.scale_shift.shift.repeat(len(model_heads)).clone()
-            )
+            target = model.scale_shift.shift
+            new = model_foundations.scale_shift.shift.repeat(n_heads).clone()
+            new = new.to(dtype=target.dtype, device=target.device)
+            if new.shape == target.shape:
+                model.scale_shift.shift = new
 
     # Broadcast any remaining foundation buffer/parameter whose model
     # counterpart differs only in a singleton head dim. Catches the
@@ -523,7 +550,10 @@ def transfer_foundation_readouts_and_scale_shift(
             d = diff_dims[0]
             if fparam.shape[d] != 1 or mparam.shape[d] != n_heads:
                 continue
-            mparam.copy_(fparam.expand_as(mparam).clone())
+            src = fparam.expand_as(mparam).to(
+                dtype=mparam.dtype, device=mparam.device
+            )
+            mparam.copy_(src)
             n_broadcast += 1
         _logging.info(
             f"[magnetic foundation transfer] broadcast head-dim "
