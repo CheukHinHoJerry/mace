@@ -370,3 +370,197 @@ def load_foundations(
             continue
         model_state[name].copy_(param)
     return model
+
+
+def transfer_foundation_readouts_and_scale_shift(
+    model,
+    model_foundations,
+    load_readout: bool = True,
+    use_shift: bool = True,
+    use_scale: bool = True,
+):
+    """Broadcast a foundation's single-head readouts and scale_shift to all
+    heads of a (potentially multi-head) fine-tuning model. Same algebra as
+    the readout / scale_shift sections of ``load_foundations_elements``, but
+    without the interaction / product element-filter machinery -- so it
+    works for magnetic models where the standard ``load_foundations_elements``
+    cannot run.
+    """
+    z_table = AtomicNumberTable([int(z) for z in model_foundations.atomic_numbers])
+    model_heads = model.heads
+    num_species_foundations = len(z_table.zs)
+    num_channels_foundation = (
+        model_foundations.node_embedding.linear.weight.shape[0]
+        // num_species_foundations
+    )
+
+    def _assign_param_safe(module, attr_name, new_tensor, ctx):
+        """Replace ``module.<attr_name>`` with a Parameter built from
+        ``new_tensor``, but first match the target's shape, dtype, and device.
+        Skip with a warning if the shape doesn't match -- safer than letting
+        forward blow up downstream.
+        """
+        import logging as _logging
+        existing = getattr(module, attr_name)
+        if existing is None:
+            return
+        if existing.shape != new_tensor.shape:
+            _logging.warning(
+                f"[magnetic foundation transfer] {ctx}: shape mismatch "
+                f"{tuple(new_tensor.shape)} vs target {tuple(existing.shape)}, "
+                "leaving the target parameter unchanged."
+            )
+            return
+        new_tensor = new_tensor.to(dtype=existing.dtype, device=existing.device)
+        setattr(module, attr_name, torch.nn.Parameter(new_tensor))
+
+    if load_readout:
+        for i, readout in enumerate(model.readouts):
+            cls = readout.__class__.__name__
+            if cls == "LinearReadoutBlock":
+                w = (
+                    model_foundations.readouts[i]
+                    .linear.weight.view(num_channels_foundation, -1)
+                    .repeat(1, len(model_heads))
+                    .flatten()
+                    .clone()
+                )
+                _assign_param_safe(readout.linear, "weight", w, f"readouts.{i}.linear.weight")
+
+            elif cls in ("NonLinearBiasReadoutBlock", "NonLinearReadoutBlock"):
+                assert hasattr(readout, "linear_1"), "expected linear_1 on readout"
+                shape_input_1 = (
+                    model_foundations.readouts[i]
+                    .linear_1.__dict__["irreps_out"].num_irreps
+                )
+                shape_output_1 = readout.linear_1.__dict__["irreps_out"].num_irreps
+
+                w1 = (
+                    model_foundations.readouts[i]
+                    .linear_1.weight.view(num_channels_foundation, -1)
+                    .repeat(1, len(model_heads))
+                    .flatten()
+                    .clone()
+                )
+                _assign_param_safe(readout.linear_1, "weight", w1, f"readouts.{i}.linear_1.weight")
+
+                if (
+                    readout.linear_1.bias is not None
+                    and readout.linear_1.bias.numel() > 0
+                ):
+                    b1 = (
+                        model_foundations.readouts[i]
+                        .linear_1.bias.view(-1)
+                        .repeat(len(model_heads))
+                        .clone()
+                    )
+                    _assign_param_safe(readout.linear_1, "bias", b1, f"readouts.{i}.linear_1.bias")
+
+                if hasattr(readout, "linear_mid"):
+                    w_mid = (
+                        model_foundations.readouts[i]
+                        .linear_mid.weight.view(shape_input_1, shape_input_1)
+                        .repeat(len(model_heads), len(model_heads))
+                        .flatten()
+                        .clone()
+                        / ((shape_input_1) / (shape_output_1)) ** 0.5
+                    )
+                    _assign_param_safe(readout.linear_mid, "weight", w_mid, f"readouts.{i}.linear_mid.weight")
+                    if (
+                        readout.linear_mid.bias is not None
+                        and readout.linear_mid.bias.numel() > 0
+                    ):
+                        b_mid = (
+                            model_foundations.readouts[i]
+                            .linear_mid.bias.repeat(len(model_heads))
+                            .clone()
+                        )
+                        _assign_param_safe(readout.linear_mid, "bias", b_mid, f"readouts.{i}.linear_mid.bias")
+
+                if hasattr(readout, "linear_2"):
+                    w2 = (
+                        model_foundations.readouts[i]
+                        .linear_2.weight.view(shape_input_1, -1)
+                        .repeat(len(model_heads), len(model_heads))
+                        .flatten()
+                        .clone()
+                        / ((shape_input_1) / (shape_output_1)) ** 0.5
+                    )
+                    _assign_param_safe(readout.linear_2, "weight", w2, f"readouts.{i}.linear_2.weight")
+                    if (
+                        readout.linear_2.bias is not None
+                        and readout.linear_2.bias.numel() > 0
+                    ):
+                        b2 = (
+                            model_foundations.readouts[i]
+                            .linear_2.bias.view(-1)
+                            .repeat(len(model_heads))
+                            .flatten()
+                            .clone()
+                        )
+                        _assign_param_safe(readout.linear_2, "bias", b2, f"readouts.{i}.linear_2.bias")
+
+    if (
+        hasattr(model, "scale_shift")
+        and model.scale_shift is not None
+        and hasattr(model_foundations, "scale_shift")
+        and model_foundations.scale_shift is not None
+    ):
+        n_heads = len(model_heads)
+        if use_scale:
+            target = model.scale_shift.scale
+            new = model_foundations.scale_shift.scale.repeat(n_heads).clone()
+            new = new.to(dtype=target.dtype, device=target.device)
+            if new.shape == target.shape:
+                model.scale_shift.scale = new
+        if use_shift:
+            target = model.scale_shift.shift
+            new = model_foundations.scale_shift.shift.repeat(n_heads).clone()
+            new = new.to(dtype=target.dtype, device=target.device)
+            if new.shape == target.shape:
+                model.scale_shift.shift = new
+
+    # Broadcast any remaining foundation buffer/parameter whose model
+    # counterpart differs only in a singleton head dim. Catches the
+    # magnetic per-head buffers (onebody_magmombasis_coeffs,
+    # one_body_magmom_const_correction, atomic_energies_fn.atomic_energies,
+    # readouts.*.output_mask, ...) that load_foundations skipped on shape
+    # mismatch. Requires the new model to use the foundation's full
+    # atomic-number table (--foundation_model_elements=True); otherwise the
+    # element dim also differs and the broadcast is skipped.
+    n_heads = len(model_heads)
+    if n_heads > 1:
+        import logging as _logging
+        skip_names = {"atomic_energies_fn.atomic_energies"}
+        model_state = model.state_dict()
+        foundation_state = model_foundations.state_dict()
+        n_broadcast = 0
+        for name, fparam in foundation_state.items():
+            if name in skip_names:
+                continue
+            if name not in model_state:
+                continue
+            mparam = model_state[name]
+            if mparam.shape == fparam.shape:
+                continue
+            if fparam.ndim != mparam.ndim:
+                continue
+            diff_dims = [
+                i for i in range(fparam.ndim) if fparam.shape[i] != mparam.shape[i]
+            ]
+            if len(diff_dims) != 1:
+                continue
+            d = diff_dims[0]
+            if fparam.shape[d] != 1 or mparam.shape[d] != n_heads:
+                continue
+            src = fparam.expand_as(mparam).to(
+                dtype=mparam.dtype, device=mparam.device
+            )
+            mparam.copy_(src)
+            n_broadcast += 1
+        _logging.info(
+            f"[magnetic foundation transfer] broadcast head-dim "
+            f"({n_heads}) for {n_broadcast} foundation tensors."
+        )
+
+    return model

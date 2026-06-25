@@ -257,9 +257,10 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "MACELES",
         "PolarMACE",
         "MagneticScaleShiftMACE",
+        "MagneticNonSOCScaleShiftMACE",
     ]:
         return {
-            "error": "Model is not a ScaleShiftMACE, MACELES, PolarMACE, or MagneticScaleShiftMACE model"
+            "error": "Model is not a ScaleShiftMACE, MACELES, PolarMACE, MagneticScaleShiftMACE, or MagneticNonSOCScaleShiftMACE model"
         }
 
     def radial_to_name(radial_type):
@@ -352,7 +353,10 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "atomic_inter_shift": shift.cpu().numpy(),
         "heads": heads,
     }
-    if model.__class__.__name__ == "MagneticScaleShiftMACE":
+    if model.__class__.__name__ in (
+        "MagneticScaleShiftMACE",
+        "MagneticNonSOCScaleShiftMACE",
+    ):
         config["m_max"] = model.m_max.cpu().tolist()
         config["max_m_ell"] = int(model.mag_solid_harmoics.SH.l_max())
         config["num_mag_radial_basis"] = int(model.mag_radial_embedding.num_basis)

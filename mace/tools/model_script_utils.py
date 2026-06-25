@@ -7,7 +7,11 @@ from e3nn import o3
 
 from mace import modules
 from mace.modules.wrapper_ops import CuEquivarianceConfig
-from mace.tools.finetuning_utils import load_foundations, load_foundations_elements
+from mace.tools.finetuning_utils import (
+    load_foundations,
+    load_foundations_elements,
+    transfer_foundation_readouts_and_scale_shift,
+)
 from mace.tools.scripts_utils import (
     extract_config_mace_model,
     parse_hidden_irreps,
@@ -234,9 +238,13 @@ def configure_model(
         else:
             logging.info(
                 "Foundation model has non-standard (e.g. magnetic) interaction blocks; "
-                "using generic name+shape state_dict transfer (readouts re-initialised)."
+                "using generic name+shape state_dict transfer plus broadcast of "
+                "foundation readouts + scale_shift across new heads."
             )
             model = load_foundations(model, model_foundation, include_readouts=False)
+            model = transfer_foundation_readouts_and_scale_shift(
+                model, model_foundation
+            )
 
     return model, output_args
 

@@ -825,6 +825,9 @@ def run(args) -> None:
         args.enable_oeq = False
     if args.enable_cueq and not args.only_cueq:
         logging.info("Converting model to CUEQ for accelerated training")
+        # MagneticNonSOCScaleShiftMACE intentionally excluded -- its NonSOC
+        # products use NonSOCSymmetricContraction, which the CUEQ converter
+        # does not understand.
         assert model.__class__.__name__ in [
             "MACE",
             "ScaleShiftMACE",
@@ -835,6 +838,7 @@ def run(args) -> None:
         model = run_e3nn_to_cueq(deepcopy(model), device=device)
     if args.enable_oeq:
         logging.info("Converting model to OEQ for accelerated training")
+        # MagneticNonSOCScaleShiftMACE intentionally excluded (see CUEQ note above).
         assert model.__class__.__name__ in [
             "MACE",
             "ScaleShiftMACE",

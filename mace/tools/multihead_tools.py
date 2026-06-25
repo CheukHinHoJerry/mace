@@ -467,7 +467,9 @@ def inherit_magnetic_hyperparameters_from_foundation(
             foundation_m_max = foundation_m_max.detach().cpu().tolist()
         elif hasattr(foundation_m_max, "tolist"):
             foundation_m_max = foundation_m_max.tolist()
-        args.m_max = foundation_m_max
+        foundation_zs = model_foundation.atomic_numbers.detach().cpu().tolist()
+        m_max_by_z = {int(z): float(v) for z, v in zip(foundation_zs, foundation_m_max)}
+        args.m_max = [repr(m_max_by_z)]
         inherited_magnetic_args["m_max_len"] = len(foundation_m_max)
 
     foundation_max_m_ell = foundation_config.get("max_m_ell")
@@ -490,5 +492,10 @@ def inherit_magnetic_hyperparameters_from_foundation(
         inherited_magnetic_args["num_mag_radial_basis_one_body"] = (
             args.num_mag_radial_basis_one_body
         )
+
+    foundation_use_magmom_one_body = foundation_config.get("use_magmom_one_body")
+    if foundation_use_magmom_one_body is not None:
+        args.use_magmom_one_body = bool(foundation_use_magmom_one_body)
+        inherited_magnetic_args["use_magmom_one_body"] = args.use_magmom_one_body
 
     return inherited_magnetic_args
