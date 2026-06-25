@@ -531,10 +531,13 @@ def transfer_foundation_readouts_and_scale_shift(
     n_heads = len(model_heads)
     if n_heads > 1:
         import logging as _logging
+        skip_names = {"atomic_energies_fn.atomic_energies"}
         model_state = model.state_dict()
         foundation_state = model_foundations.state_dict()
         n_broadcast = 0
         for name, fparam in foundation_state.items():
+            if name in skip_names:
+                continue
             if name not in model_state:
                 continue
             mparam = model_state[name]

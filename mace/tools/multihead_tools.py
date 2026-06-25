@@ -493,4 +493,9 @@ def inherit_magnetic_hyperparameters_from_foundation(
             args.num_mag_radial_basis_one_body
         )
 
+    foundation_use_magmom_one_body = foundation_config.get("use_magmom_one_body")
+    if foundation_use_magmom_one_body is not None:
+        args.use_magmom_one_body = bool(foundation_use_magmom_one_body)
+        inherited_magnetic_args["use_magmom_one_body"] = args.use_magmom_one_body
+
     return inherited_magnetic_args
