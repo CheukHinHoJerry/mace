@@ -332,6 +332,7 @@ class PolarMACE(ScaleShiftMACE):
         field_si: bool = False,
         include_electrostatic_self_interaction: bool = False,
         add_local_electron_energy: bool = False,
+        compute_mm_coulomb: bool = True,
         quadrupole_feature_corrections: bool = False,
         return_electrostatic_potentials: bool = False,
         field_feature_norms: Optional[List[float]] = None,
@@ -401,6 +402,16 @@ class PolarMACE(ScaleShiftMACE):
         )
         self.atomic_multipoles_smearing_width = float(atomic_multipoles_smearing_width)
         self.add_local_electron_energy = add_local_electron_energy
+        # Master switch for *all* MM-charge-mediated Coulomb terms inside the
+        # model: the MM→QM field-feature contribution to charge prediction
+        # (`_compute_mm_field_features*`) and the ML-MM electrostatic energy
+        # accumulated into `electrostatic_energy` / `ml_mm_electrostatic_energy`.
+        # Set to False at inference time to evaluate the model as if no MM
+        # input was passed, even when `mm_positions`/`mm_charges` ARE provided —
+        # useful for ablation studies of MM-Coulomb's effect on the cluster's
+        # polarisation response.
+        # Default True preserves existing behaviour for old saved models.
+        self.compute_mm_coulomb = compute_mm_coulomb
         self.quadrupole_feature_corrections = quadrupole_feature_corrections
         self.field_si = field_si
         self.keep_last_layer_irreps = True
@@ -644,6 +655,11 @@ class PolarMACE(ScaleShiftMACE):
         compute_hessian: bool,
         compute_edge_forces: bool,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # Global runtime gate: if compute_mm_coulomb is False, behave as if
+        # no MM input was provided (skip MM→QM field-feature computation).
+        if not getattr(self, "compute_mm_coulomb", True):
+            return None, None
+
         mm_positions = _get_optional_data_tensor(data, "mm_positions")
         mm_charges = _get_optional_data_tensor(data, "mm_charges")
         mm_multipoles = _get_optional_data_tensor(data, "mm_multipoles")
@@ -795,6 +811,11 @@ class PolarMACE(ScaleShiftMACE):
         Verified bit-equivalent on the QM rows in
         `graph_electrostatics/tests/test_features_source_target.py`.
         """
+
+        # Global runtime gate: if compute_mm_coulomb is False, behave as if
+        # no MM input was provided (skip MM→QM field-feature computation).
+        if not getattr(self, "compute_mm_coulomb", True):
+            return None, None
 
         mm_positions = _get_optional_data_tensor(data, "mm_positions")
         mm_charges = _get_optional_data_tensor(data, "mm_charges")
@@ -1436,8 +1457,17 @@ class PolarMACE(ScaleShiftMACE):
             force_pbc_evaluator=use_pbc_evaluator,
         )
 
-        mm_positions = _get_optional_data_tensor(data, "mm_positions")
-        mm_charges = _get_optional_data_tensor(data, "mm_charges")
+        # Global runtime gate: when compute_mm_coulomb is False, do NOT
+        # accumulate any MM-Coulomb contribution into the electrostatic
+        # energy (intra-cluster + Ewald between learned charges still
+        # contribute as usual; only the cross + intra-MM terms are
+        # suppressed).
+        if not getattr(self, "compute_mm_coulomb", True):
+            mm_positions = None
+            mm_charges = None
+        else:
+            mm_positions = _get_optional_data_tensor(data, "mm_positions")
+            mm_charges = _get_optional_data_tensor(data, "mm_charges")
         mm_source_batch = _get_optional_data_tensor(data, "mm_source_batch")
         mm_mm_electrostatic_energy = torch.zeros_like(electro_energy)
         if not (mm_positions is None or mm_charges is None):
