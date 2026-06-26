@@ -1,3 +1,4 @@
+import math
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -6,12 +7,17 @@ from e3nn.util.jit import compile_mode
 
 try:
     from graph_longrange.energy import GTOElectrostaticEnergy
-    from graph_longrange.features import GTOElectrostaticFeatures
+    from graph_longrange.features import (
+        GTOElectrostaticFeatures,
+        assemble_fourier_series_batch,
+    )
     from graph_longrange.gto_utils import (
         DisplacedGTOExternalFieldBlock,
         gto_basis_kspace_cutoff,
     )
     from graph_longrange.kspace import compute_k_vectors_flat
+    from graph_longrange.slabs import slab_dipole_correction_energy
+    from graph_longrange.utils import FIELD_CONSTANT
 
     GRAPH_LONGRANGE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
@@ -333,6 +339,7 @@ class PolarMACE(ScaleShiftMACE):
         include_electrostatic_self_interaction: bool = False,
         add_local_electron_energy: bool = False,
         compute_mm_coulomb: bool = True,
+        mm_chunk_size: int = 4096,
         quadrupole_feature_corrections: bool = False,
         return_electrostatic_potentials: bool = False,
         field_feature_norms: Optional[List[float]] = None,
@@ -412,6 +419,7 @@ class PolarMACE(ScaleShiftMACE):
         # polarisation response.
         # Default True preserves existing behaviour for old saved models.
         self.compute_mm_coulomb = compute_mm_coulomb
+        self.mm_chunk_size = int(mm_chunk_size)
         self.quadrupole_feature_corrections = quadrupole_feature_corrections
         self.field_si = field_si
         self.keep_last_layer_irreps = True
@@ -1068,6 +1076,129 @@ class PolarMACE(ScaleShiftMACE):
             return None
         return charge_density_mul_ir[:, 1:4]
 
+    def _assemble_rho_chunked(
+        self,
+        source_feats: torch.Tensor,
+        node_positions: torch.Tensor,
+        batch: torch.Tensor,
+        k_vectors: torch.Tensor,
+        k_norm2: torch.Tensor,
+        k_vector_batch: torch.Tensor,
+        k0_mask: torch.Tensor,
+        volume: torch.Tensor,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        density_basis_fs = self.coulomb_energy.density_basis(
+            k_vectors, k_norm2, k0_mask
+        )
+        volume_per_k = volume.reshape(-1)[k_vector_batch]
+        n_k = k_vectors.shape[0]
+        rho = torch.zeros(
+            (n_k, 2), dtype=source_feats.dtype, device=source_feats.device
+        )
+        n_nodes = source_feats.shape[0]
+        if n_nodes == 0:
+            return rho
+        step = max(1, int(chunk_size))
+        for start in range(0, n_nodes, step):
+            end = min(start + step, n_nodes)
+            chunk_feats = source_feats[start:end]
+            chunk_pos = node_positions[start:end]
+            chunk_batch = batch[start:end]
+            inner_products = k_vectors @ chunk_pos.t()
+            mask = (k_vector_batch[:, None] == chunk_batch[None, :]).to(
+                inner_products.dtype
+            )
+            cosines = torch.cos(inner_products) * mask
+            sines = torch.sin(inner_products) * mask
+            rho = rho + assemble_fourier_series_batch(
+                source_feats=chunk_feats,
+                cosines=cosines,
+                sines=sines,
+                density_basis_fs=density_basis_fs,
+                volume_per_k=volume_per_k,
+            )
+        return rho
+
+    def _pbc_mm_cross_energy(
+        self,
+        *,
+        ml_features: torch.Tensor,
+        ml_positions: torch.Tensor,
+        ml_batch: torch.Tensor,
+        mm_features: torch.Tensor,
+        mm_positions: torch.Tensor,
+        mm_batch: torch.Tensor,
+        k_vectors: torch.Tensor,
+        k_norm2: torch.Tensor,
+        k_vector_batch: torch.Tensor,
+        k0_mask: torch.Tensor,
+        volume: torch.Tensor,
+        pbc: torch.Tensor,
+        mm_chunk_size: int = 4096,
+    ):
+        n_ml = max(1, int(ml_features.shape[0]))
+        rho_ml = self._assemble_rho_chunked(
+            ml_features, ml_positions, ml_batch,
+            k_vectors, k_norm2, k_vector_batch, k0_mask, volume,
+            chunk_size=n_ml,
+        )
+        rho_mm = self._assemble_rho_chunked(
+            mm_features, mm_positions, mm_batch,
+            k_vectors, k_norm2, k_vector_batch, k0_mask, volume,
+            chunk_size=mm_chunk_size,
+        )
+        valid = k0_mask <= 0.0
+        dot = rho_ml[:, 0] * rho_mm[:, 0] + rho_ml[:, 1] * rho_mm[:, 1]
+        per_k = torch.zeros_like(k_norm2)
+        per_k[valid] = 2.0 * FIELD_CONSTANT * dot[valid] / k_norm2[valid]
+        cross_kspace_E = torch.zeros_like(volume)
+        cross_kspace_E.index_add_(0, k_vector_batch, per_k)
+        cross_kspace_E = volume * cross_kspace_E / (2 * math.pi) ** 6
+
+        if getattr(self.coulomb_energy, "include_pbc_corrections", True):
+            mixed_features = torch.cat([ml_features, mm_features], dim=0)
+            mixed_positions = torch.cat([ml_positions, mm_positions], dim=0)
+            mixed_batch = torch.cat([ml_batch, mm_batch], dim=0)
+            ml_lm = ml_features.squeeze(-2) if ml_features.dim() == 3 else ml_features
+            mm_lm = mm_features.squeeze(-2) if mm_features.dim() == 3 else mm_features
+            mixed_lm = (
+                mixed_features.squeeze(-2)
+                if mixed_features.dim() == 3
+                else mixed_features
+            )
+            mol = self.coulomb_energy.monopole_dipole_correction
+            cross_mol = (
+                mol(mixed_lm, mixed_positions, volume, mixed_batch)
+                - mol(ml_lm, ml_positions, volume, ml_batch)
+                - mol(mm_lm, mm_positions, volume, mm_batch)
+            )
+            cross_slab = (
+                slab_dipole_correction_energy(
+                    mixed_lm, mixed_positions, volume, mixed_batch
+                )
+                - slab_dipole_correction_energy(
+                    ml_lm, ml_positions, volume, ml_batch
+                )
+                - slab_dipole_correction_energy(
+                    mm_lm, mm_positions, volume, mm_batch
+                )
+            )
+            slab_pattern = torch.tensor(
+                [0, 0, 1], dtype=torch.bool, device=pbc.device
+            )
+            is_molecule = torch.all(torch.logical_not(pbc), dim=1)
+            is_slab = torch.all(torch.logical_xor(slab_pattern, pbc), dim=1)
+            cross_corr_E = torch.where(
+                is_molecule,
+                cross_mol,
+                torch.where(is_slab, cross_slab, torch.zeros_like(volume)),
+            )
+        else:
+            cross_corr_E = torch.zeros_like(volume)
+
+        return cross_kspace_E, cross_corr_E
+
     def forward(
         self,
         data: Dict[str, torch.Tensor],
@@ -1485,35 +1616,23 @@ class PolarMACE(ScaleShiftMACE):
                     dtype=charge_density_mul_ir.dtype,
                     device=charge_density_mul_ir.device,
                 )
-                mixed_features = torch.cat((charge_density_mul_ir, mm_features), dim=0)
-                mixed_positions = torch.cat((positions, mm_positions_for_grad), dim=0)
-                mixed_batch = torch.cat((data["batch"], mm_source_batch), dim=0)
-                mixed_electrostatic_energy = self.coulomb_energy(
+                cross_kspace_E, cross_corr_E = self._pbc_mm_cross_energy(
+                    ml_features=charge_density_mul_ir,
+                    ml_positions=positions,
+                    ml_batch=data["batch"],
+                    mm_features=mm_features,
+                    mm_positions=mm_positions_for_grad,
+                    mm_batch=mm_source_batch,
                     k_vectors=k_vectors,
                     k_norm2=kv_norms_squared,
                     k_vector_batch=k_vectors_batch,
                     k0_mask=k_vectors_0mask,
-                    source_feats=mixed_features,
-                    node_positions=mixed_positions,
-                    batch=mixed_batch,
                     volume=data["volume"],
                     pbc=data["pbc"].view(-1, 3),
-                    force_pbc_evaluator=use_pbc_evaluator,
+                    mm_chunk_size=self.mm_chunk_size,
                 )
-                mm_mm_electrostatic_energy = self.coulomb_energy(
-                    k_vectors=k_vectors,
-                    k_norm2=kv_norms_squared,
-                    k_vector_batch=k_vectors_batch,
-                    k0_mask=k_vectors_0mask,
-                    source_feats=mm_features,
-                    node_positions=mm_positions_for_grad,
-                    batch=mm_source_batch,
-                    volume=data["volume"],
-                    pbc=data["pbc"].view(-1, 3),
-                    force_pbc_evaluator=use_pbc_evaluator,
-                )
-                electro_energy = mixed_electrostatic_energy - mm_mm_electrostatic_energy
-                ml_mm_electrostatic_energy = electro_energy
+                ml_mm_electrostatic_energy = cross_kspace_E + cross_corr_E
+                electro_energy = electro_energy + ml_mm_electrostatic_energy
                 ml_mm_dipole_energy = torch.zeros_like(electro_energy)
             else:
                 ml_charges = charge_density_mul_ir[:, 0]
