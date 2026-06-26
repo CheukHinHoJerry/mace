@@ -1120,9 +1120,22 @@ class PolarMACE(ScaleShiftMACE):
             )
         return rho
 
+    @staticmethod
+    def _pad_to_num_graphs(
+        per_graph: torch.Tensor, num_graphs: int
+    ) -> torch.Tensor:
+        if per_graph.shape[0] == num_graphs:
+            return per_graph
+        padded = torch.zeros(
+            num_graphs, dtype=per_graph.dtype, device=per_graph.device
+        )
+        if per_graph.shape[0] > 0:
+            limit = min(per_graph.shape[0], num_graphs)
+            padded[:limit] = per_graph[:limit]
+        return padded
+
     def _pbc_mm_cross_energy(
         self,
-        *,
         ml_features: torch.Tensor,
         ml_positions: torch.Tensor,
         ml_batch: torch.Tensor,
@@ -1136,7 +1149,7 @@ class PolarMACE(ScaleShiftMACE):
         volume: torch.Tensor,
         pbc: torch.Tensor,
         mm_chunk_size: int = 4096,
-    ):
+    ) -> "tuple[torch.Tensor, torch.Tensor]":
         n_ml = max(1, int(ml_features.shape[0]))
         rho_ml = self._assemble_rho_chunked(
             ml_features, ml_positions, ml_batch,
@@ -1157,6 +1170,7 @@ class PolarMACE(ScaleShiftMACE):
         cross_kspace_E = volume * cross_kspace_E / (2 * math.pi) ** 6
 
         if getattr(self.coulomb_energy, "include_pbc_corrections", True):
+            num_graphs = int(volume.shape[0])
             mixed_features = torch.cat([ml_features, mm_features], dim=0)
             mixed_positions = torch.cat([ml_positions, mm_positions], dim=0)
             mixed_batch = torch.cat([ml_batch, mm_batch], dim=0)
@@ -1168,20 +1182,41 @@ class PolarMACE(ScaleShiftMACE):
                 else mixed_features
             )
             mol = self.coulomb_energy.monopole_dipole_correction
+            # `MonopoleDipoleCorrectionBlock` and `slab_dipole_correction_energy`
+            # both scatter without an explicit dim_size, so the result is sized
+            # to max(batch)+1 — shorter than `volume` when the trailing graph
+            # has no ML or no MM nodes. Pad each term to num_graphs before
+            # subtracting so a per-graph (mixed - ML - MM) algebra is exact.
             cross_mol = (
-                mol(mixed_lm, mixed_positions, volume, mixed_batch)
-                - mol(ml_lm, ml_positions, volume, ml_batch)
-                - mol(mm_lm, mm_positions, volume, mm_batch)
+                self._pad_to_num_graphs(
+                    mol(mixed_lm, mixed_positions, volume, mixed_batch),
+                    num_graphs,
+                )
+                - self._pad_to_num_graphs(
+                    mol(ml_lm, ml_positions, volume, ml_batch), num_graphs
+                )
+                - self._pad_to_num_graphs(
+                    mol(mm_lm, mm_positions, volume, mm_batch), num_graphs
+                )
             )
             cross_slab = (
-                slab_dipole_correction_energy(
-                    mixed_lm, mixed_positions, volume, mixed_batch
+                self._pad_to_num_graphs(
+                    slab_dipole_correction_energy(
+                        mixed_lm, mixed_positions, volume, mixed_batch
+                    ),
+                    num_graphs,
                 )
-                - slab_dipole_correction_energy(
-                    ml_lm, ml_positions, volume, ml_batch
+                - self._pad_to_num_graphs(
+                    slab_dipole_correction_energy(
+                        ml_lm, ml_positions, volume, ml_batch
+                    ),
+                    num_graphs,
                 )
-                - slab_dipole_correction_energy(
-                    mm_lm, mm_positions, volume, mm_batch
+                - self._pad_to_num_graphs(
+                    slab_dipole_correction_energy(
+                        mm_lm, mm_positions, volume, mm_batch
+                    ),
+                    num_graphs,
                 )
             )
             slab_pattern = torch.tensor(
