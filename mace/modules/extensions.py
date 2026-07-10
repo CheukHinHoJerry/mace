@@ -1397,15 +1397,6 @@ class MagneticScaleShiftMACE(MagneticMACE):
         )
 
         if self.use_magmom_one_body:
-            # coefficient for the chebyshev polynomails
-            #
-            # Zero-init: before this was torch.randn, injecting ~1 eV of pure
-            # per-element noise into the atomic energy that the readout then had
-            # to learn around. Under train_one_body_contribution=True the
-            # optimizer would additionally push these 890 random values from
-            # step 1, colliding with the co-adapting readout. Zero-init keeps
-            # the one-body term neutral at start (frozen -> silent contribution;
-            # trainable -> learns from a clean baseline).
             self.onebody_magmombasis_coeffs = torch.nn.Parameter(
                 torch.zeros(
                     len(self.atomic_numbers),
