@@ -89,6 +89,8 @@ class Random3DRotation(BaseTransform):
             R = sample_rotation_matrix(data.magmom.device, data.magmom.dtype)
             # === Apply to magmom (shape [N, 3])
             data.magmom = torch.matmul(data.magmom, R.T)
+            if hasattr(data, "magforces") and data.magforces is not None:
+                data.magforces = torch.matmul(data.magforces, R.T)
 
         return data
 
