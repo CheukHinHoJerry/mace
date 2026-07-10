@@ -1513,7 +1513,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
         )  # (n_atoms, n_basis)
 
         # one body contribution radials, this is with constant shift so that it can be fitted
-        if self.use_magmom_one_body:
+        if hasattr(self, "one_body_cheb_basis_with_const"):
             magmom_one_body_radials = self.one_body_cheb_basis_with_const(
                 magmom_lenghts_trans
             )
@@ -1545,7 +1545,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
 
             node_feats_list.append(node_feats)
             if idx == (len(self.readouts) - 1):
-                if self.use_magmom_one_body:
+                if hasattr(self, "one_body_cheb_basis_with_const"):
                     # linear (natom, num_basis) -> (natom, 1)
                     # remove certain constant to make it matches with E0,
                     # self.one_body_magmom_const_correction is computed outside after pre-training
@@ -1822,7 +1822,7 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
         )
         magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans)
-        if self.use_magmom_one_body:
+        if hasattr(self, "one_body_cheb_basis_with_const"):
             magmom_one_body_radials = self.one_body_cheb_basis_with_const(
                 magmom_lenghts_trans
             )
@@ -1861,7 +1861,7 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                 magmom_node_attrs=magmom_node_attrs,
             )
             node_feats_list.append(node_feats)
-            if idx == (len(self.readouts) - 1) and self.use_magmom_one_body:
+            if idx == (len(self.readouts) - 1) and hasattr(self, "one_body_cheb_basis_with_const"):
                 selected_coeffs = torch.einsum(
                     "ns,sbh->nbh", data["node_attrs"], self.onebody_magmombasis_coeffs
                 )

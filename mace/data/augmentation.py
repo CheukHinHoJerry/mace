@@ -131,15 +131,29 @@ def create_random_rotation_loader(original_loader):
 
     transformed_dataset = TransformedDataset(dataset, transform)
 
-    # Reuse the original sampler so the DistributedSampler (and set_epoch shuffling)
-    # is preserved under DDP; for single-process runs this keeps the RandomSampler.
-    new_loader = tg_mace.dataloader.DataLoader(
-        transformed_dataset,
+    # Under distributed training the original loader has a DistributedSampler
+    # already sharding the dataset per rank; replacing it with shuffle=True
+    # would make every rank iterate the whole dataset, duplicating samples and
+    # breaking the effective epoch size. Pass the sampler through in that case
+    # (and don't also set shuffle=, which DataLoader forbids alongside a
+    # sampler). Otherwise keep the previous shuffle-based behavior.
+    sampler = getattr(original_loader, "sampler", None)
+    is_distributed_sampler = isinstance(
+        sampler, torch.utils.data.distributed.DistributedSampler
+    )
+    loader_kwargs = dict(
         batch_size=original_loader.batch_size,
-        sampler=original_loader.sampler,
         num_workers=original_loader.num_workers,
         pin_memory=original_loader.pin_memory,
         drop_last=original_loader.drop_last,
     )
+    if is_distributed_sampler:
+        loader_kwargs["sampler"] = sampler
+    else:
+        loader_kwargs["shuffle"] = not isinstance(
+            sampler, torch.utils.data.SequentialSampler
+        )
+
+    new_loader = tg_mace.dataloader.DataLoader(transformed_dataset, **loader_kwargs)
 
     return new_loader
