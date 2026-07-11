@@ -308,6 +308,7 @@ def _build_model(
             max_m_ell=args.max_m_ell,
             num_mag_radial_basis=args.num_mag_radial_basis,
             num_mag_radial_basis_one_body=args.num_mag_radial_basis_one_body,
+            one_body_spectral_degree=getattr(args, "one_body_spectral_degree", 0.0),
             use_magmom_one_body=args.use_magmom_one_body,
             **extra,
         )

@@ -365,6 +365,9 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
             config["num_mag_radial_basis_one_body"] = int(
                 model.onebody_magmombasis_coeffs.shape[1]
             )
+            config["one_body_spectral_degree"] = float(
+                getattr(model.one_body_cheb_basis_with_const, "degree_scale_power", 0.0)
+            )
 
     if model.__class__.__name__ == "AtomicDielectricMACE":
         config["use_polarizability"] = model.use_polarizability
@@ -1045,13 +1048,15 @@ def get_params_options(
         hasattr(model, "onebody_magmombasis_coeffs")
         and args.train_one_body_contribution
     ):
-        param_options["params"].append(
-            {
-                "name": "onebody_magmombasis_coeffs",
-                "params": [model.onebody_magmombasis_coeffs],
-                "weight_decay": 0.0,
-            }
-        )
+        one_body_group = {
+            "name": "onebody_magmombasis_coeffs",
+            "params": [model.onebody_magmombasis_coeffs],
+            "weight_decay": getattr(args, "one_body_weight_decay", 0.0),
+        }
+        one_body_lr_factor = getattr(args, "one_body_lr_factor", 1.0)
+        if one_body_lr_factor != 1.0:
+            one_body_group["lr"] = one_body_lr_factor * args.lr
+        param_options["params"].append(one_body_group)
     return param_options
 
 
@@ -1070,7 +1075,9 @@ def get_optimizer(
         _param_options = {k: v for k, v in param_options.items() if k != "amsgrad"}
         _param_options.pop("betas", None)
         optimizer = adamw_schedulefree.AdamWScheduleFree(
-            **_param_options, betas=(args.beta1_schedulefree, args.beta2_schedulefree)
+            **_param_options,
+            betas=(args.beta1_schedulefree, args.beta2_schedulefree),
+            warmup_steps=getattr(args, "warmup_steps_schedulefree", 0),
         )
     else:
         optimizer = torch.optim.Adam(**param_options)

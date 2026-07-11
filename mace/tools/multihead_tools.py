@@ -493,6 +493,15 @@ def inherit_magnetic_hyperparameters_from_foundation(
             args.num_mag_radial_basis_one_body
         )
 
+    foundation_one_body_spectral_degree = foundation_config.get(
+        "one_body_spectral_degree"
+    )
+    if foundation_one_body_spectral_degree is not None:
+        args.one_body_spectral_degree = float(foundation_one_body_spectral_degree)
+        inherited_magnetic_args["one_body_spectral_degree"] = (
+            args.one_body_spectral_degree
+        )
+
     foundation_use_magmom_one_body = foundation_config.get("use_magmom_one_body")
     if foundation_use_magmom_one_body is not None:
         args.use_magmom_one_body = bool(foundation_use_magmom_one_body)

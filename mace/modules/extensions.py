@@ -1042,7 +1042,13 @@ class ChebyshevBasisGeneral(torch.nn.Module):
         include_constant (bool): Whether to include T₀(x)=1 as first term.
     """
 
-    def __init__(self, r_max: float, num_basis: int = 8, include_constant: bool = True):
+    def __init__(
+        self,
+        r_max: float,
+        num_basis: int = 8,
+        include_constant: bool = True,
+        degree_scale_power: float = 0.0,
+    ):
         super().__init__()
         self.r_max = r_max
         self.num_basis = num_basis
@@ -1051,6 +1057,14 @@ class ChebyshevBasisGeneral(torch.nn.Module):
         # Store the polynomial orders for compatibility
         start = 0 if include_constant else 1
         self.register_buffer("n", torch.arange(start, start + num_basis))
+
+        # Spectral smoothing: attenuate high-degree modes by 1/(1+k)**p so the
+        # linear head built on this basis prefers smooth (low-frequency) curves.
+        # p=0 -> all-ones scale (exact no-op). Baked into the basis (persisted as
+        # a buffer) so training and eval reconstruct the identical scaled curve.
+        self.degree_scale_power = float(degree_scale_power)
+        scale = (1.0 + self.n.to(torch.get_default_dtype())) ** (-float(degree_scale_power))
+        self.register_buffer("degree_scale", scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1075,6 +1089,11 @@ class ChebyshevBasisGeneral(torch.nn.Module):
             out = torch.cat(basis[: self.num_basis], dim=-1)
         else:
             out = torch.cat(basis[1 : self.num_basis + 1], dim=-1)
+        # per-degree spectral scaling (buffer absent on models saved before this
+        # feature -> behave exactly as the unscaled basis)
+        scale = getattr(self, "degree_scale", None)
+        if scale is not None:
+            out = out * scale.to(out.dtype)
         return out
 
     def __repr__(self):
@@ -1393,6 +1412,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
         **kwargs,
     ):
         num_mag_radial_basis_one_body = kwargs.pop("num_mag_radial_basis_one_body")
+        one_body_spectral_degree = kwargs.pop("one_body_spectral_degree", 0.0)
         super().__init__(**kwargs)
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
@@ -1411,6 +1431,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
                 r_max=1.0,
                 num_basis=num_mag_radial_basis_one_body,
                 include_constant=True,
+                degree_scale_power=one_body_spectral_degree,
             )
 
             # correction to shift E0s for each species
@@ -1418,6 +1439,43 @@ class MagneticScaleShiftMACE(MagneticMACE):
                 "one_body_magmom_const_correction",
                 torch.zeros(len(self.atomic_numbers), len(self.heads)),
             )
+
+    def onebody_curvature_penalty(self, n_grid: int = 64) -> torch.Tensor:
+        """Mean squared discrete second derivative of the one-body magmom energy
+        curve E(|m|) over |m| in [0, m_max], summed over species and heads.
+
+        E(|m|) is linear in ``onebody_magmombasis_coeffs``, so this is a smooth
+        quadratic (Tikhonov-style) roughness penalty. Adding it to the training
+        loss damps the unconstrained Chebyshev ringing of the one-body head,
+        especially the large-|m| extrapolation regions of near-nonmagnetic
+        elements. Independent of the batch (depends only on the head params)."""
+        if not hasattr(self, "one_body_cheb_basis_with_const"):
+            return self.onebody_magmombasis_coeffs.new_zeros(())
+        coeffs = self.onebody_magmombasis_coeffs  # (S, B, H)
+        device, dtype = coeffs.device, coeffs.dtype
+        # normalized grid x = |m| / m_max in [0, 1]; same transform as the forward.
+        x = torch.linspace(0.0, 1.0, n_grid, device=device, dtype=dtype)
+        trans = 1.0 - 2.0 * x**2
+        radials = self.one_body_cheb_basis_with_const(trans.unsqueeze(-1))
+        radials = radials.reshape(n_grid, -1).to(dtype)  # (n_grid, B)
+        curve = torch.einsum("gb,sbh->sgh", radials, coeffs)  # (S, n_grid, H)
+        d2 = curve[:, 2:, :] - 2.0 * curve[:, 1:-1, :] + curve[:, :-2, :]
+        return (d2**2).mean()
+
+    def one_body_zero_offset(self) -> torch.Tensor:
+        """Per-species, per-head value of the one-body curve at |m|=0.
+
+        At zero moment the transform is trans = 1 - 2*(0)**2 = 1, and every
+        Chebyshev basis function satisfies T_b(1) = 1, so the offset is just
+        sum_b coeff[s,b,h]. Subtracting it makes the one-body term vanish at
+        |m|=0, i.e. removes the constant (m^0) component and leaves a pure
+        even-power correction m^2 + m^4 + ... (the transform 1-2*(|m|/m_max)^2
+        is even in |m|, so T_b(trans) contains only even powers of |m|)."""
+        coeffs = self.onebody_magmombasis_coeffs  # (S, B, H)
+        ones = self.one_body_cheb_basis_with_const(
+            coeffs.new_ones(1, 1)
+        ).reshape(1, -1)  # (1, B) == [T_b(1)] == ones
+        return torch.einsum("gb,sbh->sh", ones, coeffs)  # (S, H)
 
     def forward(
         self,
@@ -1557,10 +1615,15 @@ class MagneticScaleShiftMACE(MagneticMACE):
                         self.onebody_magmombasis_coeffs,
                     )
                     #
+                    if getattr(self, "pin_one_body_zero", False):
+                        # pure even-power term: subtract E(|m|=0) so no constant survives
+                        _off = self.one_body_zero_offset()  # (S, H)
+                    else:
+                        _off = self.one_body_magmom_const_correction
                     one_body_correction = torch.einsum(
                         "ns,sh->nh",
                         data["node_attrs"],
-                        self.one_body_magmom_const_correction,
+                        _off,
                     )
 
                     # Compute dot product over nbasis → (n_nodes, num_heads)
@@ -1868,10 +1931,12 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                 selected_coeffs = torch.einsum(
                     "ns,sbh->nbh", data["node_attrs"], self.onebody_magmombasis_coeffs
                 )
+                if getattr(self, "pin_one_body_zero", False):
+                    _off = self.one_body_zero_offset()  # (S, H)
+                else:
+                    _off = self.one_body_magmom_const_correction
                 one_body_correction = torch.einsum(
-                    "ns,sh->nh",
-                    data["node_attrs"],
-                    self.one_body_magmom_const_correction,
+                    "ns,sh->nh", data["node_attrs"], _off
                 )
                 onebody_magmom_contri = (
                     magmom_one_body_radials.unsqueeze(-1) * selected_coeffs

@@ -955,6 +955,31 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.98,
     )
+    parser.add_argument(
+        "--warmup_steps_schedulefree",
+        help="Number of linear LR warmup steps for the ScheduleFree optimizer "
+        "(0 = no warmup; the schedulefree library recommends a few hundred to a "
+        "few thousand for stability, especially for the force channel)",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--one_body_curvature_weight",
+        help="Weight of a smoothness (squared second-derivative) penalty on the "
+        "one-body magmom energy head. 0 disables it. Damps Chebyshev ringing / "
+        "large-|m| extrapolation of the one-body curve.",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--one_body_spectral_degree",
+        help="Spectral smoothing exponent p for the one-body Chebyshev basis: each "
+        "degree-k mode is scaled by 1/(1+k)**p, baked into the basis (not a loss "
+        "term). p=0 disables it (exact no-op); larger p attenuates high-frequency "
+        "modes harder so the one-body head prefers smooth curves.",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--batch_size", help="batch size", type=int, default=10)
     parser.add_argument(
         "--valid_batch_size", help="Validation batch size", type=int, default=10
@@ -1220,6 +1245,31 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "(only relevant when --use_magmom_one_body is set).",
         type=str2bool,
         default=True,
+    )
+    parser.add_argument(
+        "--one_body_lr_factor",
+        help="Multiplier on the base LR for the magmom one-body coefficient param "
+        "group (only relevant when --train_one_body_contribution). <1 slows the "
+        "one-body head to stabilize training; 1.0 = same LR as the rest.",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--pin_one_body_zero",
+        help="If true, subtract the one-body curve's value at |m|=0 on every "
+        "forward pass so the one-body magmom term vanishes at zero moment "
+        "(a pure even-power m^2+m^4+... correction, no constant m^0 term). "
+        "Replaces the static one_body_magmom_const_correction buffer.",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--one_body_weight_decay",
+        help="Weight decay applied to the magmom one-body coefficient param group "
+        "(only relevant when --train_one_body_contribution). Pulls the head toward "
+        "zero (its init) to prevent runaway per-element energy shifts.",
+        type=float,
+        default=0.0,
     )
     parser.add_argument(
         "--data_aug_magmom",
