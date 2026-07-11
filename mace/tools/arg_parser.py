@@ -978,7 +978,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "term). p=0 disables it (exact no-op); larger p attenuates high-frequency "
         "modes harder so the one-body head prefers smooth curves.",
         type=float,
-        default=0.0,
+        default=2.0,
     )
     parser.add_argument("--batch_size", help="batch size", type=int, default=10)
     parser.add_argument(
@@ -1261,7 +1261,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "(a pure even-power m^2+m^4+... correction, no constant m^0 term). "
         "Replaces the static one_body_magmom_const_correction buffer.",
         type=str2bool,
-        default=False,
+        default=True,
     )
     parser.add_argument(
         "--one_body_weight_decay",
