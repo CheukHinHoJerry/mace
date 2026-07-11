@@ -2010,6 +2010,7 @@ class MagneticSCFMACE(torch.nn.Module):
         use_collinear=False,
         constrain_magnitude=False,
         mask_ats=None,
+        cap_magmom_by_mmax=True,
     ):
         super().__init__()
         self.magmom_mace = model  # original magnetic mace
@@ -2022,6 +2023,9 @@ class MagneticSCFMACE(torch.nn.Module):
         self.use_collinear = use_collinear
         self.constrain_magnitude = constrain_magnitude
         self.mask_ats = mask_ats
+        # project each atom's moment onto the ball |m| <= m_max[element] during the
+        # SCF, so the moment solver can't run away (keeps it physically bounded).
+        self.cap_magmom_by_mmax = cap_magmom_by_mmax
 
         self.cache_magmom = None
 
@@ -2048,6 +2052,25 @@ class MagneticSCFMACE(torch.nn.Module):
             )
 
         magmom = magmom.to(device)
+
+        # Per-atom cap |m| <= m_max[element]; used to project the moment onto the
+        # physical ball so the SCF cannot run away. (N, 1) from the one-hot species.
+        cap_per_atom = None
+        if self.cap_magmom_by_mmax and hasattr(self.magmom_mace, "m_max"):
+            m_max_flat = self.magmom_mace.m_max.detach().to(device, magmom.dtype).flatten()
+            cap_per_atom = (
+                data["node_attrs"].to(magmom.dtype) @ m_max_flat
+            ).unsqueeze(-1)  # (N, 1)
+
+        def _project(m):
+            if cap_per_atom is None:
+                return m
+            norm = m.norm(dim=1, keepdim=True)
+            return m * torch.clamp(cap_per_atom / (norm + 1e-12), max=1.0)
+
+        # cap the initial guess too
+        with torch.no_grad():
+            magmom = _project(magmom)
         magmom.requires_grad_(True)
         energy_history = []
 
@@ -2067,6 +2090,12 @@ class MagneticSCFMACE(torch.nn.Module):
 
             def closure():
                 optimizer.zero_grad()
+
+                # Project onto |m| <= m_max before every evaluation so the model
+                # never sees (and the line search can't chase) a runaway moment.
+                if cap_per_atom is not None:
+                    with torch.no_grad():
+                        magmom.data.copy_(_project(magmom.data))
 
                 # Update magnetic moments in config
                 data["magmom"] = magmom
@@ -2118,6 +2147,12 @@ class MagneticSCFMACE(torch.nn.Module):
                 return energy
 
             optimizer.step(closure)
+
+            # Final projection so the cached/returned moment stays within m_max.
+            if cap_per_atom is not None:
+                with torch.no_grad():
+                    magmom.data.copy_(_project(magmom.data))
+                data["magmom"] = magmom
 
             # Cache final magnetic moments
             self.cache_magmom = magmom.detach()
