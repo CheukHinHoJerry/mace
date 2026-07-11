@@ -1215,7 +1215,9 @@ class MagneticMACE(torch.nn.Module):
         def layer_interaction_irreps(layer):
             return (sh_irreps * num_features_list[layer]).sort()[0].simplify()
 
-        interaction_irreps = layer_interaction_irreps(0)  # legacy alias (layers >0 below)
+        interaction_irreps = layer_interaction_irreps(
+            0
+        )  # legacy alias (layers >0 below)
         self.spherical_harmonics = o3.SphericalHarmonics(
             sh_irreps, normalize=True, normalization="component"
         )
@@ -1860,12 +1862,16 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                 magmom_node_attrs=magmom_node_attrs,
             )
             node_feats_list.append(node_feats)
-            if idx == (len(self.readouts) - 1) and hasattr(self, "one_body_cheb_basis_with_const"):
+            if idx == (len(self.readouts) - 1) and hasattr(
+                self, "one_body_cheb_basis_with_const"
+            ):
                 selected_coeffs = torch.einsum(
                     "ns,sbh->nbh", data["node_attrs"], self.onebody_magmombasis_coeffs
                 )
                 one_body_correction = torch.einsum(
-                    "ns,sh->nh", data["node_attrs"], self.one_body_magmom_const_correction
+                    "ns,sh->nh",
+                    data["node_attrs"],
+                    self.one_body_magmom_const_correction,
                 )
                 onebody_magmom_contri = (
                     magmom_one_body_radials.unsqueeze(-1) * selected_coeffs
@@ -1921,6 +1927,12 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
 # for a given position. Still later we can do something like:
 # given position also predict the magnetic moment based on the previous magnetic moment
 # to accelerate SCF cycles that have to be done
+#
+# Bohr magneton in eV/T (CODATA 2018) — used for the Zeeman contribution when
+# an external magnetic field is supplied via data["applied_B_field"].
+MU_B_EV_PER_T = 5.7883818012e-5
+
+
 class MagneticSCFMACE(torch.nn.Module):
     def __init__(
         self,
@@ -1930,6 +1942,9 @@ class MagneticSCFMACE(torch.nn.Module):
         scf_logging=False,
         scf_step_size=1.0,
         use_scf=True,
+        use_collinear=False,
+        constrain_magnitude=False,
+        mask_ats=None,
     ):
         super().__init__()
         self.magmom_mace = model  # original magnetic mace
@@ -1939,6 +1954,9 @@ class MagneticSCFMACE(torch.nn.Module):
         self.scf_logging = scf_logging
         self.scf_step_size = scf_step_size
         self.use_scf = use_scf
+        self.use_collinear = use_collinear
+        self.constrain_magnitude = constrain_magnitude
+        self.mask_ats = mask_ats
 
         self.cache_magmom = None
 
@@ -1968,6 +1986,10 @@ class MagneticSCFMACE(torch.nn.Module):
         magmom.requires_grad_(True)
         energy_history = []
 
+        applied_B_field = data.get("applied_B_field", None)
+        if applied_B_field is not None:
+            applied_B_field = applied_B_field.to(device)
+
         # === Define optimizer ===
         if self.use_scf:
             optimizer = torch.optim.LBFGS(
@@ -1995,13 +2017,38 @@ class MagneticSCFMACE(torch.nn.Module):
                 )
 
                 energy = output["energy"][0]
+                raw_grad = -output["magforces"].detach()
+
+                # Zeeman contribution
+                if applied_B_field is not None:
+                    zeeman_energy = -MU_B_EV_PER_T * (magmom * applied_B_field).sum()
+                    energy = energy + zeeman_energy
+                    raw_grad = raw_grad - MU_B_EV_PER_T * applied_B_field.detach()
+
                 energy_history.append(energy.item())
 
-                # Set gradient manually from mag_forces
-                magmom.grad = -output["magforces"].detach()
+                # Project gradient onto the sphere's tangent plane so |magmom| is
+                # preserved by LBFGS steps.
+                if self.constrain_magnitude:
+                    mu_norm = magmom / (magmom.norm(dim=1, keepdim=True) + 1e-12)
+                    raw_grad = (
+                        raw_grad
+                        - (raw_grad * mu_norm).sum(dim=1, keepdim=True) * mu_norm
+                    )
+
+                # Collinear along z: freeze the transverse components.
+                if self.use_collinear:
+                    raw_grad[:, 0] = 0.0
+                    raw_grad[:, 1] = 0.0
+
+                # Freeze magmoms for masked atoms (accepts list, tuple, or bool tensor).
+                if self.mask_ats is not None:
+                    raw_grad[self.mask_ats] = 0.0
+
+                magmom.grad = raw_grad
                 if self.scf_logging:
                     print(
-                        f"[SCF LBFGS] Energy = {energy.item():.6f} | Mag force norm = {magmom.grad.norm().item():.6f}"
+                        f"[SCF LBFGS] Energy = {energy.item():.6f} | Mag force norm = {raw_grad.norm().item():.6f}"
                     )
                 return energy
 
@@ -2020,6 +2067,11 @@ class MagneticSCFMACE(torch.nn.Module):
             compute_stress=compute_stress,
             compute_displacement=compute_displacement,
         )
+
+        if applied_B_field is not None:
+            final_output["energy"] = final_output["energy"] + (
+                -MU_B_EV_PER_T * (magmom.detach() * applied_B_field).sum()
+            )
 
         # Add SCF info to output
         final_output["scf_energy_history"] = torch.tensor(
