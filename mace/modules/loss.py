@@ -744,3 +744,44 @@ class EquivarianceLoss(torch.nn.Module):
             f"stress_weight={self.stress_weight:.3f}, "
             f"magforces_weight={self.magforces_weight:.3f})"
         )
+
+
+def magmom_local_minimality_hinge(
+    model: torch.nn.Module,
+    batch_dict: TensorDict,
+    ref_energy: torch.Tensor,
+    weight: float,
+    delta: float = 0.2,
+    cap: float = 1.0,
+) -> torch.Tensor:
+    """Local ground-state hinge on the magnetic moment.
+
+    The reference (DFT) moment is a LOCAL energy minimum, so a small random
+    perturbation ``m_DFT + delta * N(0, 1)`` must not lower the energy. This penalizes
+    ``relu(E(m_DFT) - E(m_DFT + delta))`` per atom, clamped to ``cap`` so a structure
+    that tips into a residual sink cannot produce a runaway gradient. ``ref_energy`` is
+    detached, so the term only pushes the perturbed energy up and never distorts the fit.
+
+    Does ONE extra forward pass through ``model`` (energy only) and returns the scalar,
+    weight-scaled loss. The caller sums this term into the total loss and backpropagates
+    once (a single ``loss.backward()`` covers this extra forward alongside the main one).
+    """
+    if weight < 0.0 or delta <= 0.0 or cap <= 0.0:
+        raise ValueError(
+            "magmom hinge requires weight >= 0, delta > 0 and cap > 0, got "
+            f"weight={weight}, delta={delta}, cap={cap}."
+        )
+    pert = dict(batch_dict)
+    pert["magmom"] = (
+        batch_dict["magmom"] + torch.randn_like(batch_dict["magmom"]) * delta
+    )
+    out_pert = model(
+        pert,
+        training=True,
+        compute_force=False,
+        compute_virials=False,
+        compute_stress=False,
+    )
+    natoms = (batch_dict["ptr"][1:] - batch_dict["ptr"][:-1]).clamp(min=1)
+    viol = (torch.relu(ref_energy.detach() - out_pert["energy"]) / natoms).clamp(max=cap)
+    return weight * viol.mean()

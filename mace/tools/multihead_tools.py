@@ -502,9 +502,26 @@ def inherit_magnetic_hyperparameters_from_foundation(
             args.one_body_spectral_degree
         )
 
+    # Saturation is an opt-in feature: inherit the foundation's scale only if it
+    # actually used it (>0). A non-saturated foundation (0.0/None) must NOT clobber
+    # an explicit CLI --magmom_sat_scale that enables it during fine-tuning.
+    foundation_magmom_sat_scale = foundation_config.get("magmom_sat_scale")
+    if foundation_magmom_sat_scale:  # truthy => > 0
+        args.magmom_sat_scale = float(foundation_magmom_sat_scale)
+        inherited_magnetic_args["magmom_sat_scale"] = args.magmom_sat_scale
+
     foundation_use_magmom_one_body = foundation_config.get("use_magmom_one_body")
     if foundation_use_magmom_one_body is not None:
         args.use_magmom_one_body = bool(foundation_use_magmom_one_body)
         inherited_magnetic_args["use_magmom_one_body"] = args.use_magmom_one_body
+
+    # pin_one_body_zero is applied dynamically on every forward pass, so it decides how
+    # the (inherited) one-body magmom coeffs are evaluated -- it MUST match the
+    # foundation. Forcing the current default (True) onto a foundation trained without
+    # it shifts the one-body self-energy and inflates the replay/pt_head error. Read the
+    # attribute directly off the model (absent on pre-pin-zero checkpoints => False); it
+    # is not captured by extract_config_mace_model.
+    args.pin_one_body_zero = bool(getattr(model_foundation, "pin_one_body_zero", False))
+    inherited_magnetic_args["pin_one_body_zero"] = args.pin_one_body_zero
 
     return inherited_magnetic_args

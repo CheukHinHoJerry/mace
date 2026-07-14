@@ -972,6 +972,49 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=0.0,
     )
     parser.add_argument(
+        "--magmom_hinge_weight",
+        help="Weight of the local ground-state hinge loss: penalize "
+        "relu(E(m_DFT) - E(m_DFT + delta)) so the DFT moment is a LOCAL energy "
+        "minimum (a small perturbation cannot lower the energy). 0 disables it. "
+        "Flattens the spurious interior sinks the saturation only bounds.",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--magmom_hinge_delta",
+        help="Std (mu_B) of the small random moment perturbation for the "
+        "ground-state hinge. Kept small because the E(m')>=E(m_DFT) ordering is "
+        "only valid locally (DFT gives a local, not global, moment minimum).",
+        type=float,
+        default=0.2,
+    )
+    parser.add_argument(
+        "--magmom_hinge_every",
+        help="Apply the ground-state hinge every N optimizer steps (1 = every "
+        "step). Larger N reduces the extra-forward cost.",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--magmom_hinge_cap",
+        help="Clamp each structure's per-atom hinge violation (eV/atom) so one "
+        "structure that tips into a residual sink can't produce a runaway "
+        "gradient. Keeps the hinge stable when starting from a model that still "
+        "has deep sinks.",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--magmom_sat_scale",
+        help="If > 0, feed a bounded/saturated moment to the magnetic solid "
+        "harmonics: m_eff = m / sqrt(1 + |m|^2 / m_sat^2) with m_sat = "
+        "magmom_sat_scale * m_max (per element). Preserves direction, caps "
+        "magnitude, so the cubic interaction term is bounded below. 0 disables it "
+        "(no buffer registered; existing checkpoints are unaffected). Suggested 0.5.",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
         "--one_body_spectral_degree",
         help="Spectral smoothing exponent p for the one-body Chebyshev basis: each "
         "degree-k mode is scaled by 1/(1+k)**p, baked into the basis (not a loss "

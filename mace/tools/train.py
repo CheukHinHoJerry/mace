@@ -505,16 +505,44 @@ def take_step(
         and batch_dict.get("magmom") is not None
     )
 
-    # Under DDP, defer the all-reduce until the final backward of the step so all
-    # passes accumulate locally and synchronize once (gradient-accumulation idiom).
-    def maybe_no_sync(defer):
-        if defer and distributed and hasattr(model, "no_sync"):
-            return model.no_sync()
-        return nullcontext()
+    # A step sums the main energy/force loss with any optional auxiliary losses -- the
+    # local-minimality hinge and the equivariance checks, each of which needs its own
+    # extra forward pass -- and backpropagates the total in ONE backward. This is correct
+    # under MACE's plain DDP (find_unused_parameters=False, every forward exercises every
+    # parameter): each parameter is marked ready exactly once, so the reducer all-reduces
+    # the summed gradient in a single sync. No no_sync gradient-accumulation dance needed.
+    _base = model.module if hasattr(model, "module") else model
 
     optimizer.zero_grad(set_to_none=True)
+    output = forward(batch_dict)
+    loss = loss_fn(pred=output, ref=batch)
+    # optional smoothness penalty on the one-body magmom head (param-only term)
+    _curv_w = getattr(_base, "one_body_curvature_weight", 0.0)
+    if _curv_w and hasattr(_base, "onebody_curvature_penalty"):
+        loss = loss + _curv_w * _base.onebody_curvature_penalty()
+    loss_dict = {}  # "loss" is filled with the TOTAL objective once all terms are summed
+
+    # Local ground-state hinge (scheduled): the DFT moment is a LOCAL energy minimum, so a
+    # small perturbation must not lower the energy. Physics lives in mace.modules.loss.
+    _hinge_w = getattr(_base, "magmom_hinge_weight", 0.0)
+    if _hinge_w and batch_dict.get("magmom") is not None:
+        _every = max(1, int(getattr(_base, "magmom_hinge_every", 1)))
+        _base._hinge_step = int(getattr(_base, "_hinge_step", 0)) + 1
+        if _base._hinge_step % _every == 0:
+            from mace.modules.loss import magmom_local_minimality_hinge
+
+            loss = loss + magmom_local_minimality_hinge(
+                model,
+                batch_dict,
+                output["energy"],
+                weight=_hinge_w,
+                delta=float(getattr(_base, "magmom_hinge_delta", 0.2)),
+                cap=float(getattr(_base, "magmom_hinge_cap", 1.0)),
+            )
+
+    # Equivariance consistency: score the model on independently rotated positions and
+    # spins against the unrotated reference (`output`, detached inside the loss fn).
     if do_equiv:
-        # Independent rotations: one of positions only, one of spins only.
         from mace.data import rotate_batch_dict, sample_rotation_matrix
 
         R_pos = sample_rotation_matrix(device, batch_dict["positions"].dtype)
@@ -525,41 +553,28 @@ def take_step(
         spin_dict = rotate_batch_dict(
             batch_dict, R_spin, rotate_positions=False, rotate_magmom=True
         )
-
-    with maybe_no_sync(do_equiv):
-        output = forward(batch_dict)
-        loss = loss_fn(pred=output, ref=batch)
-        # optional smoothness penalty on the one-body magmom head (param-only term)
-        _base = model.module if hasattr(model, "module") else model
-        _curv_w = getattr(_base, "one_body_curvature_weight", 0.0)
-        if _curv_w and hasattr(_base, "onebody_curvature_penalty"):
-            loss = loss + _curv_w * _base.onebody_curvature_penalty()
-        loss.backward()
-
-    loss_dict = {"loss": to_numpy(loss)}
-    if do_equiv:
         num_atoms = batch_dict["ptr"][1:] - batch_dict["ptr"][:-1]
-        with maybe_no_sync(True):  # positions-only pass (spins-only pass still follows)
-            out_pos = forward(pos_dict)
-            l_pos, m_pos = equivariance_loss_fn(
-                pred_rot=out_pos, ref_out=output, R=R_pos, mode="spatial",
-                output_args=output_args, num_atoms=num_atoms,
-            )
-            equiv_pos = equivariance_weight * l_pos
-            equiv_pos.backward()
-        out_spin = forward(spin_dict)  # final pass triggers the all-reduce
-        l_spin, m_spin = equivariance_loss_fn(
-            pred_rot=out_spin, ref_out=output, R=R_spin, mode="spin",
+
+        l_pos, m_pos = equivariance_loss_fn(
+            pred_rot=forward(pos_dict), ref_out=output, R=R_pos, mode="spatial",
             output_args=output_args, num_atoms=num_atoms,
         )
+        l_spin, m_spin = equivariance_loss_fn(
+            pred_rot=forward(spin_dict), ref_out=output, R=R_spin, mode="spin",
+            output_args=output_args, num_atoms=num_atoms,
+        )
+        equiv_pos = equivariance_weight * l_pos
         equiv_spin = equivariance_weight * l_spin
-        equiv_spin.backward()
+        loss = loss + equiv_pos + equiv_spin
         loss_dict["equivariance_loss"] = to_numpy(equiv_pos) + to_numpy(equiv_spin)
         # Per-quantity mean-squared errors (base units^2) for monitoring with units.
         for q, v in m_pos.items():
             loss_dict[f"equiv_mse_{q}_rotx"] = to_numpy(v)
         for q, v in m_spin.items():
             loss_dict[f"equiv_mse_{q}_rotm"] = to_numpy(v)
+
+    loss_dict["loss"] = to_numpy(loss)  # total optimized objective (main + aux terms)
+    loss.backward()
 
     if max_grad_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)

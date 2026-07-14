@@ -1198,6 +1198,9 @@ class MagneticMACECalculator(Calculator):
             if "equilibrated_magmom" in out.keys():
                 assert len(self.models) == 1, "magnetic mace committee not supported"
                 ret_tensors["MACE_magmoms"] = out["equilibrated_magmom"].detach()
+            if "scf_energy_history" in out.keys():
+                ret_tensors["scf_energy_history"] = out["scf_energy_history"].detach()
+                ret_tensors["scf_steps"] = int(out["scf_steps"])
 
         self.results = {}
         if self.model_type in ["MACE", "EnergyDipoleMACE"]:
@@ -1217,6 +1220,11 @@ class MagneticMACECalculator(Calculator):
 
             if "MACE_magmoms" in ret_tensors:
                 self.results["MACE_magmoms"] = ret_tensors["MACE_magmoms"].cpu().numpy()
+            if "scf_energy_history" in ret_tensors:
+                self.results["scf_energy_history"] = (
+                    ret_tensors["scf_energy_history"].cpu().numpy()
+                )
+                self.results["scf_steps"] = ret_tensors["scf_steps"]
 
             if self.num_models > 1:
                 self.results["energies"] = (

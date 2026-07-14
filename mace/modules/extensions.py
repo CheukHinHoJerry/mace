@@ -1144,6 +1144,7 @@ class MagneticMACE(torch.nn.Module):
         oeq_config: Optional[Dict[str, Any]] = None,
         lammps_mliap: Optional[bool] = False,
         readout_cls: Optional[Type[NonLinearReadoutBlock]] = NonLinearReadoutBlock,
+        magmom_sat_scale: float = 0.0,
     ):
         super().__init__()
 
@@ -1156,6 +1157,27 @@ class MagneticMACE(torch.nn.Module):
         self.register_buffer(
             "m_max", torch.tensor(m_max, dtype=torch.get_default_dtype())
         )
+        # Optional bounded saturation of the moment fed to the solid harmonics
+        # (keeps direction, caps magnitude at m_sat = magmom_sat_scale * m_max), so
+        # the cubic interaction term is bounded below. Registered ONLY when enabled
+        # (scale > 0); absent on existing checkpoints -> forward uses the raw moment,
+        # so old models are byte-identical. See _saturate_magmom.
+        self.magmom_sat_scale = float(magmom_sat_scale)
+        if self.magmom_sat_scale > 0.0:
+            # Saturation divides by m_sat^2 = (scale * m_max)^2, so every element's m_max
+            # must be strictly positive; a zero (or negative) m_max would give a zero
+            # denominator and NaN at |m| = 0. Require it here rather than guarding the
+            # hot forward path.
+            if min(m_max) <= 0.0:
+                raise ValueError(
+                    "magmom_sat_scale > 0 requires every m_max > 0 (m_sat = scale * m_max "
+                    f"must be positive), got m_max={list(m_max)}."
+                )
+            self.register_buffer(
+                "m_sat",
+                torch.tensor(m_max, dtype=torch.get_default_dtype())
+                * self.magmom_sat_scale,
+            )
         self.register_buffer(
             "num_interactions", torch.tensor(num_interactions, dtype=torch.int64)
         )
@@ -1389,6 +1411,25 @@ class MagneticMACE(torch.nn.Module):
                     )
                 )
 
+    def _saturate_magmom(
+        self, magmom: torch.Tensor, node_attrs: torch.Tensor
+    ) -> torch.Tensor:
+        """Angle-preserving, bounded saturation of the moment fed to the solid
+        harmonics: ``m_eff = m / sqrt(1 + |m|^2 / m_sat^2)``. Same direction, with
+        magnitude -> |m| for small moments and -> m_sat for large ones, so the
+        cubic interaction term is bounded below. Written as vector*scalar(|m|^2),
+        so it is smooth through m=0 (no norm, no 0/0). If the ``m_sat`` buffer is
+        absent (feature disabled / pre-existing checkpoint) this is the identity,
+        so old models are unchanged."""
+        m_sat = getattr(self, "m_sat", None)
+        if m_sat is None:
+            return magmom
+        s = m_sat[torch.argmax(node_attrs, dim=1)].unsqueeze(-1)  # (N, 1)
+        m2 = (magmom * magmom).sum(dim=-1, keepdim=True)          # |m|^2, (N, 1)
+        # m_sat is required strictly positive at construction (see where the buffer is
+        # registered), so the denominator is always > 0 and this is smooth through m = 0.
+        return magmom / torch.sqrt(1.0 + m2 / (s * s))
+
     @abstractmethod
     def forward(
         self,
@@ -1564,7 +1605,9 @@ class MagneticScaleShiftMACE(MagneticMACE):
             * torch.clamp(magmom_lenghts / element_dependent_scaling, min=0.0, max=1.0)
             ** 2
         )
-        magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
+        magmom_node_attrs = self.mag_solid_harmoics(
+            self._saturate_magmom(data["magmom"], data["node_attrs"])
+        )
 
         #
         magmom_node_feats = self.mag_radial_embedding(
@@ -1884,7 +1927,9 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
             * torch.clamp(magmom_lenghts / element_dependent_scaling, min=0.0, max=1.0)
             ** 2
         )
-        magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
+        magmom_node_attrs = self.mag_solid_harmoics(
+            self._saturate_magmom(data["magmom"], data["node_attrs"])
+        )
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans)
         if hasattr(self, "one_body_cheb_basis_with_const"):
             magmom_one_body_radials = self.one_body_cheb_basis_with_const(
@@ -2078,7 +2123,38 @@ class MagneticSCFMACE(torch.nn.Module):
         if applied_B_field is not None:
             applied_B_field = applied_B_field.to(device)
 
-        # === Define optimizer ===
+        # Shared energy + moment-gradient evaluation (used by every optimizer).
+        # Returns (energy, raw_grad) with Zeeman / constrain / collinear / mask
+        # handling applied; sets data["magmom"] for the model call.
+        def _eval_energy_grad():
+            data["magmom"] = magmom
+            output = self.magmom_mace(
+                data,
+                training=training,
+                compute_force=compute_force,
+                compute_virials=compute_virials,
+                compute_stress=compute_stress,
+                compute_displacement=compute_displacement,
+            )
+            energy = output["energy"][0]
+            raw_grad = -output["magforces"].detach()
+            if applied_B_field is not None:
+                energy = energy - MU_B_EV_PER_T * (magmom * applied_B_field).sum()
+                raw_grad = raw_grad - MU_B_EV_PER_T * applied_B_field.detach()
+            # Project gradient onto the sphere's tangent plane so |magmom| is preserved.
+            if self.constrain_magnitude:
+                mu_norm = magmom / (magmom.norm(dim=1, keepdim=True) + 1e-12)
+                raw_grad = raw_grad - (raw_grad * mu_norm).sum(dim=1, keepdim=True) * mu_norm
+            # Collinear along z: freeze the transverse components.
+            if self.use_collinear:
+                raw_grad[:, 0] = 0.0
+                raw_grad[:, 1] = 0.0
+            # Freeze magmoms for masked atoms.
+            if self.mask_ats is not None:
+                raw_grad[self.mask_ats] = 0.0
+            return energy, raw_grad
+
+        # === Solve the moment SCF ===
         if self.use_scf:
             optimizer = torch.optim.LBFGS(
                 [magmom],
@@ -2090,59 +2166,17 @@ class MagneticSCFMACE(torch.nn.Module):
 
             def closure():
                 optimizer.zero_grad()
-
                 # Project onto |m| <= m_max before every evaluation so the model
-                # never sees (and the line search can't chase) a runaway moment.
+                # never sees (and line search can't chase) a runaway moment.
                 if cap_per_atom is not None:
                     with torch.no_grad():
                         magmom.data.copy_(_project(magmom.data))
-
-                # Update magnetic moments in config
-                data["magmom"] = magmom
-
-                # Evaluate model
-                output = self.magmom_mace(
-                    data,
-                    training=training,
-                    compute_force=compute_force,
-                    compute_virials=compute_virials,
-                    compute_stress=compute_stress,
-                    compute_displacement=compute_displacement,
-                )
-
-                energy = output["energy"][0]
-                raw_grad = -output["magforces"].detach()
-
-                # Zeeman contribution
-                if applied_B_field is not None:
-                    zeeman_energy = -MU_B_EV_PER_T * (magmom * applied_B_field).sum()
-                    energy = energy + zeeman_energy
-                    raw_grad = raw_grad - MU_B_EV_PER_T * applied_B_field.detach()
-
+                energy, raw_grad = _eval_energy_grad()
                 energy_history.append(energy.item())
-
-                # Project gradient onto the sphere's tangent plane so |magmom| is
-                # preserved by LBFGS steps.
-                if self.constrain_magnitude:
-                    mu_norm = magmom / (magmom.norm(dim=1, keepdim=True) + 1e-12)
-                    raw_grad = (
-                        raw_grad
-                        - (raw_grad * mu_norm).sum(dim=1, keepdim=True) * mu_norm
-                    )
-
-                # Collinear along z: freeze the transverse components.
-                if self.use_collinear:
-                    raw_grad[:, 0] = 0.0
-                    raw_grad[:, 1] = 0.0
-
-                # Freeze magmoms for masked atoms (accepts list, tuple, or bool tensor).
-                if self.mask_ats is not None:
-                    raw_grad[self.mask_ats] = 0.0
-
                 magmom.grad = raw_grad
                 if self.scf_logging:
                     print(
-                        f"[SCF LBFGS] Energy = {energy.item():.6f} | Mag force norm = {raw_grad.norm().item():.6f}"
+                        f"[SCF lbfgs] E = {energy.item():.6f} | |mag force| = {raw_grad.norm().item():.6f}"
                     )
                 return energy
 

@@ -360,6 +360,7 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         config["m_max"] = model.m_max.cpu().tolist()
         config["max_m_ell"] = int(model.mag_solid_harmoics.SH.l_max())
         config["num_mag_radial_basis"] = int(model.mag_radial_embedding.num_basis)
+        config["magmom_sat_scale"] = float(getattr(model, "magmom_sat_scale", 0.0))
         config["use_magmom_one_body"] = bool(model.use_magmom_one_body)
         if model.use_magmom_one_body and hasattr(model, "onebody_magmombasis_coeffs"):
             config["num_mag_radial_basis_one_body"] = int(

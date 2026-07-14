@@ -784,6 +784,10 @@ def run(args) -> None:
     # attach the one-body smoothness-penalty weight so take_step can read it off the model
     model.one_body_curvature_weight = float(getattr(args, "one_body_curvature_weight", 0.0))
     model.pin_one_body_zero = bool(getattr(args, "pin_one_body_zero", False))
+    model.magmom_hinge_weight = float(getattr(args, "magmom_hinge_weight", 0.0))
+    model.magmom_hinge_delta = float(getattr(args, "magmom_hinge_delta", 0.2))
+    model.magmom_hinge_every = int(getattr(args, "magmom_hinge_every", 1))
+    model.magmom_hinge_cap = float(getattr(args, "magmom_hinge_cap", 1.0))
     model.to(device)
 
     if args.lora:
