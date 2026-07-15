@@ -1827,12 +1827,16 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                 o3.Irreps(str(hidden_list[i][0])) if i == n - 1 else hidden_list[i]
             )
             cc = contraction_cls_first if i == 0 else contraction_cls
-            # The NonSOC contraction emits only invariants, so its layer must be scalar.
-            # (The first layer's plain SymmetricContraction may carry L>0, e.g. 128x0e+128x1o.)
-            if "NonSOC" in str(cc):
+            # The NonSOC contraction now supports spatial-equivariant outputs (e.g. 1o):
+            # the spatial angular parts couple to irrep_out while the magmom (spin) parts are
+            # always contracted to a spin scalar, so an "Nx0e+Nx1o" NonSOC layer is a spatial
+            # vector that stays spin-invariant. Intermediate layers may therefore carry L>0.
+            # The LAST layer is still forced to scalars above (target = hidden_list[i][0]) so
+            # the readout sees invariants -- assert only that residual invariant.
+            if "NonSOC" in str(cc) and i == n - 1:
                 assert target_irreps.lmax == 0, (
-                    f"layer {i} uses {cc} (invariant) but target_irreps={target_irreps} "
-                    "has lmax>0; non-SOC layers must be Nx0e"
+                    f"last layer {i} uses {cc} but target_irreps={target_irreps} has lmax>0; "
+                    "the final non-SOC layer must be Nx0e for an invariant energy readout"
                 )
             products.append(
                 EquivariantProductBasisNonSOCWithSelfMagmomBlock(

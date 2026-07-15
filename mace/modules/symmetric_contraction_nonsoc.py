@@ -89,7 +89,6 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
         del internal_weights, shared_weights
 
         self.contractions = torch.nn.ModuleList()
-        # import pdb; pdb.set_trace();
         for irrep_out in self.irreps_out:
             self.contractions.append(
                 NonSOCContraction(
@@ -107,224 +106,6 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         outs = [contraction(x, y) for contraction in self.contractions]
         return torch.cat(outs, dim=-1)
-    
-# @compile_mode("script")
-# class NonSOCContraction(torch.nn.Module):
-#     def __init__(
-#         self,
-#         irreps_in: o3.Irreps,
-#         irrep_out: o3.Irreps,
-#         correlation: int,
-#         internal_weights: bool = True,
-#         num_elements: Optional[int] = None,
-#         weights: Optional[torch.Tensor] = None,
-#         magmom_irreps: Optional[o3.Irreps] = None,
-#     ) -> None:
-#         super().__init__()
-
-#         if num_elements is None:
-#             raise ValueError("num_elements must be provided for NonSOCContraction")
-#         if correlation < 1 or correlation > 3:
-#             raise ValueError(
-#                 f"NonSOCContraction currently supports correlation in [1, 3], got {correlation}"
-#             )
-
-#         # In this non-SOC path, channel index 'a' is multiplicity axis.
-#         muls = [mul for mul, _ in irreps_in]
-#         if len(set(muls)) != 1:
-#             raise ValueError(
-#                 f"NonSOCContraction expects uniform multiplicity in irreps_in; got muls={muls}"
-#             )
-#         self.num_features = int(muls[0])
-
-#         self.coupling_irreps = o3.Irreps([ir.ir for ir in irreps_in])
-#         magmom_irreps_full = (
-#             o3.Irreps(magmom_irreps)
-#             if magmom_irreps is not None
-#             else o3.Irreps("1x0e+1x1o")
-#         )
-#         # Match standard contraction behavior: CG basis on irrep types (not multiplicity).
-#         self.coupling_irreps_magmom = o3.Irreps([ir.ir for ir in magmom_irreps_full])
-
-#         self.correlation = correlation
-#         self.irrep_out = irrep_out
-
-#         assert CUET_AVAILABLE, "cuequivariance library is required but not available."
-#         dtype = torch.get_default_dtype()
-
-#         # Build CG basis buffers
-#         for nu in range(1, correlation + 1):
-#             U = U_matrix_real(
-#                 irreps_in=self.coupling_irreps,
-#                 irreps_out=irrep_out,
-#                 correlation=nu,
-#                 dtype=dtype,
-#                 use_cueq_cg=True,
-#             )[-1]
-#             self.register_buffer(f"U_matrix_{nu}", U)
-
-#         for nu in range(1, correlation + 1):
-#             Um = U_matrix_real(
-#                 irreps_in=self.coupling_irreps_magmom,
-#                 irreps_out=irrep_out,
-#                 correlation=nu,
-#                 dtype=dtype,
-#                 use_cueq_cg=True,
-#             )[-1]
-#             self.register_buffer(f"U_matrix_magmom_{nu}", Um)
-
-#         # Recursive contraction modules, mirroring Contraction class design.
-#         self.contractions_weighting = torch.nn.ModuleList()
-#         self.contractions_features = torch.nn.ModuleList()
-#         self.weights = torch.nn.ParameterList([])
-
-#         # Build from high->low, as Contraction does.
-#         for i in range(correlation, 0, -1):
-#             num_params = int(self.U_tensors(i).size(-1))
-#             num_params_magmom = int(self.U_magmom_tensors(i).size(-1))
-#             num_equivariance = 2 * irrep_out.lmax + 1
-#             num_ell_r = int(self.U_tensors(i).size(-2))
-#             num_ell_m = int(self.U_magmom_tensors(i).size(-2))
-
-#             if i == correlation:
-#                 parse_subscript_main = (
-#                     [ALPHABET[j] for j in range(i + min(irrep_out.lmax, 1) - 1)]
-#                     + ["ik,"] +
-#                     [ALPHABET_MAGMOM[j] for j in range(i + min(irrep_out.lmax, 1) - 1)]
-#                     + ["iq,ekqc,bci,be -> bc"]
-#                     + [ALPHABET[j] for j in range(i + min(irrep_out.lmax, 1) - 1)]
-#                     + [ALPHABET_MAGMOM[j] for j in range(i + min(irrep_out.lmax, 1) - 1)]
-#                 )
-#                 graph_module_main = torch.fx.symbolic_trace(
-#                     lambda x, y, p, w, z: torch.einsum(
-#                         "".join(parse_subscript_main), x, y, p, w, z
-#                     )
-#                 )
-
-#                 # Optimizing the contractions
-#                 self.graph_opt_main = opt_einsum_fx.optimize_einsums_full(
-#                     model=graph_module_main,
-#                     example_inputs=(
-#                         torch.randn(
-#                             [num_equivariance] + [num_ell_r] * i + [num_equivariance] + [num_ell_m] * i+ [num_params]
-#                         ).squeeze(0),
-#                         torch.randn(
-#                             [num_equivariance] + [num_ell_m] * i + [num_equivariance] + [num_ell_m] * i+ [num_params]
-#                         ).squeeze(0),
-#                         torch.randn((num_elements, num_params, self.num_features)),
-#                         torch.randn((BATCH_EXAMPLE, self.num_features, num_ell_r, num_ell_m)),
-#                         torch.randn((BATCH_EXAMPLE, num_elements)),
-#                     ),
-#                 )
-
-#                 self.weights_max = torch.nn.Parameter(
-#                     torch.randn((num_elements, num_params, num_params_magmom, self.num_features), dtype=dtype)
-#                     / (num_params * num_params_magmom)
-#                 )
-#             else:
-#                 # Lower-order recursive updates:
-#                 # c = contract_weights(U_i, Um_i, w_i, y)
-#                 # out = contract_features(c + out, x)
-#                 if i == 1:
-#                     eq_w = "ik,lq,ekqa,be->bail"
-#                     eq_f = "bail,bail->ba"
-#                     ex_u_shape = (num_equivariance, num_ell_r, num_params)
-#                     ex_um_shape = (num_equivariance, num_ell_m, num_params_magmom)
-#                     ex_c_shape = (BATCH_EXAMPLE, self.num_features, num_ell_r, num_ell_m)
-#                     ex_x_shape = (BATCH_EXAMPLE, self.num_features, num_ell_r, num_ell_m)
-#                 else:  # i == 2
-#                     eq_w = "ijk,lmq,ekqa,be->bajm"
-#                     eq_f = "bajm,bail->ba"
-#                     ex_u_shape = (num_equivariance, num_ell_r, num_ell_r, num_params)
-#                     ex_um_shape = (num_equivariance, num_ell_m, num_ell_m, num_params_magmom)
-#                     ex_c_shape = (BATCH_EXAMPLE, self.num_features, num_ell_r, num_ell_m)
-#                     ex_x_shape = (BATCH_EXAMPLE, self.num_features, num_ell_r, num_ell_m)
-
-#                 # graph_module_weighting = torch.fx.symbolic_trace(
-#                 #     lambda u, um, w, y, eq_w=eq_w: torch.einsum(eq_w, u, um, w, y)
-#                 # )
-#                 # graph_module_features = torch.fx.symbolic_trace(
-#                 #     lambda c, x, eq_f=eq_f: torch.einsum(eq_f, c, x)
-#                 # )
-#                 if i == 1:
-#                     graph_module_weighting = torch.fx.symbolic_trace(
-#                         lambda u, um, w, y: torch.einsum("ik,lq,ekqa,be->bail", u, um, w, y)
-#                     )
-#                     graph_module_features = torch.fx.symbolic_trace(
-#                         lambda c, x: torch.einsum("bail,bail->ba", c, x)
-#                     )
-#                 else:  # i == 2
-#                     graph_module_weighting = torch.fx.symbolic_trace(
-#                         lambda u, um, w, y: torch.einsum("ijk,lmq,ekqa,be->bajm", u, um, w, y)
-#                     )
-#                     graph_module_features = torch.fx.symbolic_trace(
-#                         lambda c, x: torch.einsum("bajm,bail->ba", c, x)
-#                     )
-
-
-#                 graph_opt_weighting = opt_einsum_fx.optimize_einsums_full(
-#                     model=graph_module_weighting,
-#                     example_inputs=(
-#                         torch.randn(ex_u_shape, dtype=dtype).squeeze(0),
-#                         torch.randn(ex_um_shape, dtype=dtype).squeeze(0),
-#                         torch.randn((num_elements, num_params, num_params_magmom, self.num_features), dtype=dtype),
-#                         torch.randn((BATCH_EXAMPLE, num_elements), dtype=dtype),
-#                     ),
-#                 )
-#                 graph_opt_features = opt_einsum_fx.optimize_einsums_full(
-#                     model=graph_module_features,
-#                     example_inputs=(
-#                         torch.randn(ex_c_shape, dtype=dtype),
-#                         torch.randn(ex_x_shape, dtype=dtype),
-#                     ),
-#                 )
-
-#                 self.contractions_weighting.append(graph_opt_weighting)
-#                 self.contractions_features.append(graph_opt_features)
-
-#                 w = torch.nn.Parameter(
-#                     torch.randn((num_elements, num_params, num_params_magmom, self.num_features), dtype=dtype)
-#                     / (num_params * num_params_magmom)
-#                 )
-#                 self.weights.append(w)
-
-#         if not internal_weights:
-#             self.weights = weights[:-1]
-#             self.weights_max = weights[-1]
-
-#     def forward(self, x: torch.Tensor, y: torch.Tensor):
-#         assert self.irrep_out.lmax == 0
-
-#         # Main term with fixed signature (U, U_mag, W, x, y)
-#         out = self.graph_opt_main(
-#             self.U_tensors(self.correlation),
-#             self.U_magmom_tensors(self.correlation),
-#             self.weights_max,
-#             x,
-#             y,
-#         )
-
-#         # Recursive lower-order corrections, matching Contraction.forward pattern.
-#         for i, (weight, contract_weights, contract_features) in enumerate(
-#             zip(self.weights, self.contractions_weighting, self.contractions_features)
-#         ):
-#             nu = self.correlation - i - 1
-#             c_tensor = contract_weights(
-#                 self.U_tensors(nu),
-#                 self.U_magmom_tensors(nu),
-#                 weight,
-#                 y,
-#             )
-#             c_tensor = c_tensor + out
-#             out = contract_features(c_tensor, x)
-
-#         return out.view(out.shape[0], -1)
-
-#     def U_tensors(self, nu: int):
-#         return dict(self.named_buffers())[f"U_matrix_{nu}"]
-
-#     def U_magmom_tensors(self, nu: int):
-#         return dict(self.named_buffers())[f"U_matrix_magmom_{nu}"]
 
 
 # @compile_mode("script")
@@ -362,6 +143,14 @@ class NonSOCContraction(torch.nn.Module):
         self.coupling_irreps_magmom = o3.Irreps([irrep.ir for irrep in magmom_irreps_full])
         self.correlation = correlation
         self.irrep_out = irrep_out
+        # Spatial output equivariance: for a scalar (0e) output this is 1 and the leading
+        # equivariance axis of the spatial U is squeezed away (legacy behaviour). For a
+        # vector (e.g. 1o) output it is 2L+1 and the spatial einsum must carry a free output
+        # index. `_equiv_letter` is empty for scalars (reproducing the original equations
+        # byte-for-byte) and a single spare einsum letter otherwise.
+        self.out_lmax = int(irrep_out.lmax)
+        self.num_equivariance = 2 * self.out_lmax + 1
+        self._equiv_letter = "z" if self.out_lmax > 0 else ""
         assert CUET_AVAILABLE, "cuequivariance library is required but not available."
         
         dtype = torch.get_default_dtype()
@@ -399,18 +188,25 @@ class NonSOCContraction(torch.nn.Module):
             correlation,
             dtype,
         )
+        # The magmom (spin) angular parts are ALWAYS contracted to a spin scalar (0e),
+        # independent of the spatial output irrep. In this non-SOC model a hidden feature
+        # of spatial irrep L (e.g. 1o) must be invariant under spin rotations, so the
+        # magmom CG basis targets 0e. For the legacy scalar case (irrep_out == 0e) this is
+        # identical to the previous behavior (irreps_out was irrep_out == 0e), so buffers
+        # for existing models are byte-identical -> backward compatible.
+        magmom_out = o3.Irreps("0e")
         for nu in range(1, correlation + 1):
             LOGGER.info(
                 "[NonSOCContraction] U_matrix_magmom_%s with irreps_in=%s irreps_out=%s correlation=%s dtype=%s",
                 nu,
                 self.coupling_irreps_magmom,
-                irrep_out,
+                magmom_out,
                 nu,
                 dtype,
             )
             U_matrix = U_matrix_real(
                 irreps_in=self.coupling_irreps_magmom,
-                irreps_out=irrep_out,
+                irreps_out=magmom_out,
                 correlation=nu,
                 dtype=dtype,
                 use_cueq_cg=True,
@@ -455,11 +251,27 @@ class NonSOCContraction(torch.nn.Module):
             self.weights = weights[:-1]
             self.weights_max = weights[-1]
 
+        # Defensive: the magmom side must actually contribute. U_matrix_real returns an
+        # all-zero U with num_params==1 when no CG path exists; if that ever happened for
+        # the magmom coupling the model would silently train as if magmoms did not exist.
+        for nu in range(1, correlation + 1):
+            um = self.U_magmom_tensors(nu)
+            if not bool(um.abs().sum() > 0):
+                raise ValueError(
+                    f"magmom CG basis U_magmom_{nu} is all-zero for irreps_in="
+                    f"{self.coupling_irreps_magmom}->0e; magmom coupling would be dead."
+                )
+
         # Build the sparse CG path buffers at construction (cheap: just the nonzero
-        # indices of U / U_magmom). forward() uses the sparse path. The opt_einsum_fx
-        # ("optimized") path is left lazy/unused (its eager build assumed the old
-        # U_matrix_real layout).
-        self._ensure_sparse_paths()
+        # indices of U / U_magmom). NOTE: _build_sparse_paths indexes U positionally
+        # assuming the spatial U is [ell]*nu + [param] (scalar output, equivariance axis
+        # squeezed). For an equivariant output (lmax>0) the spatial U has an extra leading
+        # (2L+1) axis, so the positional sparse builder would produce WRONG buffers. The
+        # default forward() routes through forward_reference (which handles lmax>0), so the
+        # sparse/optimized paths are only ever used for scalars -- skip building their
+        # buffers for lmax>0 rather than register garbage.
+        if self.irrep_out.lmax == 0:
+            self._ensure_sparse_paths()
 
     # def sparse_contract_nu2(self, U_paths, U_mag_paths, weight, x, y):
     #     idx_U, val_U = U_paths
@@ -599,6 +411,11 @@ class NonSOCContraction(torch.nn.Module):
         if hasattr(self, "sparse_path_buffers"):
             return
         self.sparse_path_buffers = {}
+        # The sparse/optimized helper paths assume scalar output (their index layout has no
+        # equivariance axis). For equivariant outputs (lmax > 0) we rely on forward_reference,
+        # so skip building sparse buffers -- avoids mis-indexed buffers AND saves memory.
+        if self.irrep_out.lmax > 0:
+            return
         for nu in range(1, self.correlation + 1):
             path = self._build_sparse_paths(nu)
             self.sparse_path_buffers[nu] = tuple(path.keys())
@@ -611,49 +428,38 @@ class NonSOCContraction(torch.nn.Module):
         return {key: getattr(self, f"sparse_nu{nu}_{key}") for key in keys}
 
     def forward_reference(self, x: torch.Tensor, y: torch.Tensor):
-        # x is of shape A_{i, k, lm, l'm'}
-        # y is node_attrs one-hot (B, e)
-        assert self.irrep_out.lmax == 0
+        # x is the non-SOC A-tensor of shape (node b, channel a, spatial-ell i, magmom-ell l).
+        # y is node_attrs one-hot (B, e).
+        #
+        # The spatial output may be equivariant (irrep_out.lmax > 0, e.g. 1o). The spatial U
+        # then carries a leading (2L+1) equivariance index; the magmom U is always a spin
+        # scalar (0e), so only the spatial side and the output carry that index. `E` is a
+        # single free einsum letter for it (empty when L == 0, which reproduces the original
+        # scalar equations exactly). The magmom-ell indices (l,m,g) are still summed out.
+        E = "d" if self.irrep_out.lmax > 0 else ""
+        equations = {
+            1: f"{E}ik,lq,ekqa,bail,be->ba{E}",
+            2: f"{E}ijk,lmq,ekqa,bail,bajm,be->ba{E}",
+            3: f"{E}ijfk,lmgq,ekqa,bail,bajm,bafg,be->ba{E}",
+        }
 
         out = None
         for nu in range(1, self.correlation + 1):
             weight_nu = self.weights_max if nu == self.correlation else self.weights[nu - 1]
-
-            if nu == 1:
-                term = contract(
-                    NONSOC_CONTRACTION_EQUATIONS[1],
-                    self.U_tensors(nu),
-                    self.U_magmom_tensors(nu),
-                    weight_nu,
-                    x,
-                    y,
-                )
-            elif nu == 2:
-                term = contract(
-                    NONSOC_CONTRACTION_EQUATIONS[2],
-                    self.U_tensors(nu),
-                    self.U_magmom_tensors(nu),
-                    weight_nu,
-                    x,
-                    x,
-                    y,
-                )
-            elif nu == 3:
-                term = contract(
-                    NONSOC_CONTRACTION_EQUATIONS[3],
-                    self.U_tensors(nu),
-                    self.U_magmom_tensors(nu),
-                    weight_nu,
-                    x,
-                    x,
-                    x,
-                    y,
-                )
-            else:
+            if nu not in equations:
                 raise ValueError(f"Unsupported correlation order: {nu}")
-
+            # x is repeated nu times (bail, bajm, bafg); U/U_magmom/weight/y once.
+            term = contract(
+                equations[nu],
+                self.U_tensors(nu),
+                self.U_magmom_tensors(nu),
+                weight_nu,
+                *([x] * nu),
+                y,
+            )
             out = term if out is None else (out + term)
 
+        # (node, channel[, 2L+1]) -> (node, channel * (2L+1)); mul-major, matching e3nn/MACE.
         return out.view(out.shape[0], -1)
 
     def forward_optimized(self, x: torch.Tensor, y: torch.Tensor):

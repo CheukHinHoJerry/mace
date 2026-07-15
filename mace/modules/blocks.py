@@ -1929,11 +1929,38 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
             torch.nn.functional.silu,
         )
 
-        self.reshape_tp_m_mji = reshape_irreps(self.conv_tp_m.irreps_out, cueq_config=self.cueq_config)
-        self.inv_reshape_tp_m_mji = inverse_reshape_irreps(self.conv_tp_m.irreps_out, cueq_config=self.cueq_config)
+        # When node_feats carries L>0 (e.g. a 64x0e+64x1o hidden layer), conv_tp_r/conv_tp_m
+        # emit MULTIPLE paths per output irrep -> non-uniform / duplicated irreps
+        # (e.g. 8x0e+8x0e+8x1o+8x1o+8x1o+...). reshape_irreps then produces a spatial/magmom
+        # angular axis that no longer matches the product-basis U (which is built from the
+        # uniform target). Project the messages back to uniform irreps first. For SCALAR node
+        # features (the only case used historically) conv_tp_*.irreps_out is ALREADY uniform and
+        # equals the target, so we skip the projection entirely -> existing checkpoints/params
+        # are byte-identical (backward compatible).
+        num_features = self.target_irreps.count(o3.Irrep(0, 1))
+        self._project_messages = o3.Irreps(self.node_feats_irreps).lmax > 0
+        if self._project_messages:
+            self._r_msg_irreps = o3.Irreps(self.target_irreps)
+            self._m_msg_irreps = o3.Irreps(
+                [(num_features, ir.ir) for ir in o3.Irreps(self.magmom_node_attrs_irreps)]
+            )
+            self.linear_r_proj = Linear(
+                self.conv_tp_r.irreps_out, self._r_msg_irreps,
+                internal_weights=True, shared_weights=True, cueq_config=self.cueq_config,
+            )
+            self.linear_m_proj = Linear(
+                self.conv_tp_m.irreps_out, self._m_msg_irreps,
+                internal_weights=True, shared_weights=True, cueq_config=self.cueq_config,
+            )
+        else:
+            self._r_msg_irreps = self.conv_tp_r.irreps_out
+            self._m_msg_irreps = self.conv_tp_m.irreps_out
 
-        self.reshape_tp_r_mji = reshape_irreps(self.conv_tp_r.irreps_out, cueq_config=self.cueq_config)
-        self.inv_reshape_tp_r_mji = inverse_reshape_irreps(self.conv_tp_r.irreps_out, cueq_config=self.cueq_config)
+        self.reshape_tp_m_mji = reshape_irreps(self._m_msg_irreps, cueq_config=self.cueq_config)
+        self.inv_reshape_tp_m_mji = inverse_reshape_irreps(self._m_msg_irreps, cueq_config=self.cueq_config)
+
+        self.reshape_tp_r_mji = reshape_irreps(self._r_msg_irreps, cueq_config=self.cueq_config)
+        self.inv_reshape_tp_r_mji = inverse_reshape_irreps(self._r_msg_irreps, cueq_config=self.cueq_config)
 
 
         # --- 5. Linear post-processing ---
@@ -1960,11 +1987,12 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
         #     W = torch.nn.Parameter(torch.randn(mul_m, mul_m) / np.sqrt(mul_m))
         #     self.linear_lm_weight_list.append(W)
 
-        # In _setup, define joint weights:
+        # In _setup, define joint weights (over the message irreps actually used downstream,
+        # i.e. the projected uniform irreps when node feats are non-scalar):
         self.linear_block_weight_list = torch.nn.ParameterList()
-        for mul_r, ir_r in self.conv_tp_r.irreps_out:
+        for mul_r, ir_r in self._r_msg_irreps:
             block_weights = []
-            for mul_m, ir_m in self.conv_tp_m.irreps_out:
+            for mul_m, ir_m in self._m_msg_irreps:
                 # Joint weight for this (l, l') block
                 # Operates on the shared k dimension
                 # Assuming k is the same for both r and m (from the einsum 'bkl,bkp->bklp')
@@ -1973,7 +2001,30 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
                 block_weights.append(W)
             self.linear_block_weight_list.append(torch.nn.ParameterList(block_weights))
 
-
+        # --- 6b. Block-weight offset fix (applied in forward) ---
+        # reshape_irreps produces [B, mul, sum(ir.dim)]: it factors `mul` onto the CHANNEL
+        # axis, so the angular axis of pooled_A has size Dr = sum(ir.dim), NOT sum(mul*ir.dim).
+        # The historical loop sliced with cumsum(mul*ir.dim), which:
+        #   * on the scalar-node path is harmless (the overshoot clamps to the whole axis, a
+        #     single uniform channel-mix -> EQUIVARIANT and byte-identical), and
+        #   * on the L>0 (node_feats.lmax>0) path is BROKEN: when mul < Dr the loop applies
+        #     DIFFERENT [k,k] mixes to angular components of the SAME irrep, which does not
+        #     commute with the Wigner-D action -> the block output is NON-equivariant (and
+        #     4/6 W_blocks receive zero gradient -> DDP find_unused_parameters hazard).
+        # The correct offsets are cumsum(ir.dim). We INFER when to apply the fix directly from
+        # the layer: it is ON exactly when this layer carries L>0 node features
+        # (_project_messages == node_feats.lmax > 0). That keeps legacy scalar models
+        # byte-identical while every L>0 model is correct-by-default -- no flag to set, nothing
+        # to forget at eval/resume. (No L>0 checkpoint predates this fix, so there is nothing
+        # legacy to reproduce.)
+        self._fix_block_offsets = bool(self._project_messages)
+        if self._fix_block_offsets:
+            # loop assumes a single shared channel count k across all r- and m-message irreps
+            _muls = {mul for mul, _ in self._r_msg_irreps} | {mul for mul, _ in self._m_msg_irreps}
+            assert len(_muls) == 1, (
+                "block-weight loop assumes one shared channel count k; got "
+                f"r={list(self._r_msg_irreps)} m={list(self._m_msg_irreps)}"
+            )
 
         # --- 7. Density normalization (mirrors SOC density handling) ---
         self.density_fn = nn.FullyConnectedNet(
@@ -2030,7 +2081,13 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
         # --- compute positional and magnetic edge messages ---
         r_msg = self.conv_tp_r(node_feats[sender], edge_attrs, tp_r_weights)  # φ_{klm}(r_j)
         m_msg = self.conv_tp_m(node_feats[sender], magmom_node_attrs[sender], tp_m_weights)  # φ'_{k'l'm'}(m_j)
-        
+
+        # Project non-scalar-node message paths back to uniform target irreps (no-op for the
+        # scalar-node case: _project_messages is False and these attrs don't exist -> skip).
+        if getattr(self, "_project_messages", False):
+            r_msg = self.linear_r_proj(r_msg)
+            m_msg = self.linear_m_proj(m_msg)
+
         r_msg = self.reshape_tp_r_mji(r_msg)
         m_msg = self.reshape_tp_m_mji(m_msg)
         # import pdb; pdb.set_trace();
@@ -2064,13 +2121,21 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(MagneticInt
          # In forward, apply block-wise transformations:
         pooled_A_transformed = torch.zeros_like(pooled_A)
 
-        r_dim_offsets = np.cumsum([0] + [mul * ir.dim for mul, ir in self.conv_tp_r.irreps_out])
-        m_dim_offsets = np.cumsum([0] + [mul * ir.dim for mul, ir in self.conv_tp_m.irreps_out])
+        if getattr(self, "_fix_block_offsets", False):
+            # correct: reshape_irreps put `mul` on the channel axis; slice the angular axis
+            # (size Dr = sum(ir.dim)) per irrep so each block is exactly one (ir_r, ir_m) pair.
+            r_dim_offsets = np.cumsum([0] + [ir.dim for _, ir in self._r_msg_irreps])
+            m_dim_offsets = np.cumsum([0] + [ir.dim for _, ir in self._m_msg_irreps])
+        else:
+            # legacy (byte-identical on the scalar path; non-equivariant when mul < Dr on the
+            # L>0 path — see _setup). offsets overshoot the real angular axis.
+            r_dim_offsets = np.cumsum([0] + [mul * ir.dim for mul, ir in self._r_msg_irreps])
+            m_dim_offsets = np.cumsum([0] + [mul * ir.dim for mul, ir in self._m_msg_irreps])
 
-        for i_l, (mul_r, ir_r) in enumerate(self.conv_tp_r.irreps_out):
+        for i_l, (mul_r, ir_r) in enumerate(self._r_msg_irreps):
             dim_r_start, dim_r_end = r_dim_offsets[i_l], r_dim_offsets[i_l + 1]
-            
-            for j_l, (mul_m, ir_m) in enumerate(self.conv_tp_m.irreps_out):
+
+            for j_l, (mul_m, ir_m) in enumerate(self._m_msg_irreps):
                 dim_m_start, dim_m_end = m_dim_offsets[j_l], m_dim_offsets[j_l + 1]
                 
                 # Get block-specific weight
