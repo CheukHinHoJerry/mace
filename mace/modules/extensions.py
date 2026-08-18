@@ -1213,7 +1213,13 @@ class MagneticMACE(torch.nn.Module):
             include_constant=False,
         )
 
-        magmom_sh_irreps = o3.Irreps.spherical_harmonics(max_m_ell)
+        # Magnetic moments are AXIAL vectors (pseudovectors): under inversion m -> +m,
+        # unlike positions which flip. Their spherical harmonics therefore carry parity
+        # (+1)**l, i.e. 0e + 1e + 2e + ..., NOT the (-1)**l of a polar vector. The numerical
+        # values of the harmonics are identical either way, but the irrep LABELS drive the
+        # parity selection rules of every downstream tensor product, so mislabelling them as
+        # 1o admits spin-space couplings that violate inversion symmetry (ACEsuit/mace#1647).
+        magmom_sh_irreps = o3.Irreps.spherical_harmonics(max_m_ell, p=1)
 
         # simplify this later
         self.mag_solid_harmoics = SHModule(
@@ -1265,7 +1271,7 @@ class MagneticMACE(torch.nn.Module):
                 f"{self.mag_radial_embedding.num_basis}x0e"
             ),
             magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(
-                self.mag_solid_harmoics.SH.l_max()
+                self.mag_solid_harmoics.SH.l_max(), p=1
             ),
         )
 
@@ -1318,7 +1324,7 @@ class MagneticMACE(torch.nn.Module):
                     f"{self.mag_radial_embedding.num_basis}x0e"
                 ),
                 magmom_node_attrs_irreps=o3.Irreps.spherical_harmonics(
-                    self.mag_solid_harmoics.SH.l_max()
+                    self.mag_solid_harmoics.SH.l_max(), p=1
                 ),
             )
 
