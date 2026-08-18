@@ -115,14 +115,15 @@ def configure_model(
 
         args.max_L = model_config_foundation["hidden_irreps"].lmax
 
+        # Magnetic models are deliberately absent here: they carry their energy offset in
+        # the per-element E0s and the one-body magmom head, so they take the [0.0] branch
+        # below, matching the non-foundation builders.
         if args.model in (
             "ScaleShiftMACE",
             "PolarMACE",
-            "MagneticScaleShiftMACE",
         ) or model_foundation.__class__.__name__ in (
             "ScaleShiftMACE",
             "PolarMACE",
-            "MagneticScaleShiftMACE",
         ):
             model_config_foundation["atomic_inter_shift"] = (
                 _determine_atomic_inter_shift(args.mean, heads)
@@ -258,6 +259,38 @@ def _build_model(
     args, model_config, model_config_foundation, heads
 ):  # pylint: disable=too-many-return-statements
 
+    if args.model == "MagneticNonSOCScaleShiftMACE":
+        m_max = resolve_m_max(args.m_max, list(model_config["atomic_numbers"]))
+        return modules.MagneticNonSOCScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            # Magnetic models carry their energy offset in the per-element E0s and the
+            # one-body magmom head, so the scale-shift block must not add a second
+            # data-derived shift on top.
+            atomic_inter_shift=[0.0] * len(heads),
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+            num_mag_radial_basis_one_body=args.num_mag_radial_basis_one_body,
+            use_magmom_one_body=args.use_magmom_one_body,
+            one_body_spectral_degree=getattr(args, "one_body_spectral_degree", 0.0),
+            magmom_sat_scale=getattr(args, "magmom_sat_scale", 0.0),
+            contraction_cls=getattr(
+                args, "contraction_cls", "NonSOCSymmetricContraction"
+            ),
+            contraction_cls_first=getattr(
+                args, "contraction_cls_first", "SymmetricContraction"
+            ),
+        )
     if args.model == "MagneticScaleShiftMACE":
         m_max = resolve_m_max(args.m_max, list(model_config["atomic_numbers"]))
         return modules.MagneticScaleShiftMACE(
@@ -269,7 +302,10 @@ def _build_model(
             interaction_cls_first=modules.interaction_classes[args.interaction_first],
             MLP_irreps=o3.Irreps(args.MLP_irreps),
             atomic_inter_scale=args.std,
-            atomic_inter_shift=_determine_atomic_inter_shift(args.mean, heads),
+            # Magnetic models carry their energy offset in the per-element E0s and the
+            # one-body magmom head, so the scale-shift block must not add a second
+            # data-derived shift on top.
+            atomic_inter_shift=[0.0] * len(heads),
             radial_MLP=ast.literal_eval(args.radial_MLP),
             radial_type=args.radial_type,
             heads=heads,
@@ -278,6 +314,8 @@ def _build_model(
             num_mag_radial_basis=args.num_mag_radial_basis,
             num_mag_radial_basis_one_body=args.num_mag_radial_basis_one_body,
             use_magmom_one_body=args.use_magmom_one_body,
+            one_body_spectral_degree=getattr(args, "one_body_spectral_degree", 0.0),
+            magmom_sat_scale=getattr(args, "magmom_sat_scale", 0.0),
         )
     if args.model == "MACE":
         if args.interaction_first not in [

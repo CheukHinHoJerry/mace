@@ -49,6 +49,7 @@ from mace.tools.torch_tools import spherical_to_cartesian
 
 from .blocks import (
     AtomicEnergiesBlock,
+    EquivariantProductBasisNonSOCWithSelfMagmomBlock,
     EquivariantProductBasisWithSelfMagmomBlock,
     InteractionBlock,
     LinearNodeEmbeddingBlock,
@@ -1382,7 +1383,13 @@ class ChebyshevBasisGeneral(torch.nn.Module):
         include_constant (bool): Whether to include T₀(x)=1 as first term.
     """
 
-    def __init__(self, r_max: float, num_basis: int = 8, include_constant: bool = True):
+    def __init__(
+        self,
+        r_max: float,
+        num_basis: int = 8,
+        include_constant: bool = True,
+        degree_scale_power: float = 0.0,
+    ):
         super().__init__()
         self.r_max = r_max
         self.num_basis = num_basis
@@ -1391,6 +1398,15 @@ class ChebyshevBasisGeneral(torch.nn.Module):
         # Store the polynomial orders for compatibility
         start = 0 if include_constant else 1
         self.register_buffer("n", torch.arange(start, start + num_basis))
+
+        # Spectral smoothing: attenuate high-degree modes by 1/(1+k)**p so the linear head
+        # built on this basis prefers smooth (low-frequency) curves. p=0 is an exact no-op.
+        # Baked into the basis as a buffer so training and eval reconstruct the same curve.
+        self.degree_scale_power = float(degree_scale_power)
+        scale = (1.0 + self.n.to(torch.get_default_dtype())) ** (
+            -float(degree_scale_power)
+        )
+        self.register_buffer("degree_scale", scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1415,6 +1431,11 @@ class ChebyshevBasisGeneral(torch.nn.Module):
             out = torch.cat(basis[: self.num_basis], dim=-1)
         else:
             out = torch.cat(basis[1 : self.num_basis + 1], dim=-1)
+        # per-degree spectral scaling (buffer absent on models saved before this feature
+        # -> behaves exactly as the unscaled basis)
+        scale = getattr(self, "degree_scale", None)
+        if scale is not None:
+            out = out * scale.to(out.dtype)
         return out
 
     def __repr__(self):
@@ -1465,6 +1486,7 @@ class MagneticMACE(torch.nn.Module):
         oeq_config: Optional[Dict[str, Any]] = None,
         lammps_mliap: Optional[bool] = False,
         readout_cls: Optional[Type[NonLinearReadoutBlock]] = NonLinearReadoutBlock,
+        magmom_sat_scale: float = 0.0,
     ):
         super().__init__()
 
@@ -1477,6 +1499,25 @@ class MagneticMACE(torch.nn.Module):
         self.register_buffer(
             "m_max", torch.tensor(m_max, dtype=torch.get_default_dtype())
         )
+        # Optional bounded saturation of the moment fed to the solid harmonics (keeps
+        # direction, caps magnitude at m_sat = magmom_sat_scale * m_max) so the cubic
+        # interaction term stays bounded. Registered ONLY when enabled (scale > 0);
+        # absent on existing checkpoints -> the forward uses the raw moment, so old
+        # models are byte-identical. See _saturate_magmom.
+        self.magmom_sat_scale = float(magmom_sat_scale)
+        if self.magmom_sat_scale > 0.0:
+            # Saturation divides by m_sat^2, so every element's m_max must be strictly
+            # positive; a zero would give a zero denominator and NaN at |m| = 0.
+            if min(m_max) <= 0.0:
+                raise ValueError(
+                    "magmom_sat_scale > 0 requires every m_max > 0 (m_sat = scale * "
+                    f"m_max must be positive), got m_max={list(m_max)}."
+                )
+            self.register_buffer(
+                "m_sat",
+                torch.tensor(m_max, dtype=torch.get_default_dtype())
+                * self.magmom_sat_scale,
+            )
         self.register_buffer(
             "num_interactions", torch.tensor(num_interactions, dtype=torch.int64)
         )
@@ -1711,15 +1752,19 @@ class MagneticScaleShiftMACE(MagneticMACE):
         **kwargs,
     ):
         num_mag_radial_basis_one_body = kwargs.pop("num_mag_radial_basis_one_body", 0)
+        one_body_spectral_degree = kwargs.pop("one_body_spectral_degree", 0.0)
         super().__init__(**kwargs)
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
         )
 
         if self.use_magmom_one_body:
-            # coefficient for the chebyshev polynomails
+            # Zero init, not randn: with --train_one_body_contribution=False these
+            # coefficients stay at their initial value, so a random init would freeze
+            # spurious per-element energy offsets into the model. Zero makes the
+            # one-body term exactly inert until it is actually trained.
             self.onebody_magmombasis_coeffs = torch.nn.Parameter(
-                torch.randn(
+                torch.zeros(
                     len(self.atomic_numbers),
                     num_mag_radial_basis_one_body,
                     len(self.heads),
@@ -1729,6 +1774,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
             self.one_body_cheb_basis_with_const = ChebyshevBasisGeneral(
                 r_max=1.0,
                 num_basis=num_mag_radial_basis_one_body,
+                degree_scale_power=one_body_spectral_degree,
                 include_constant=True,
             )
 
@@ -1737,6 +1783,39 @@ class MagneticScaleShiftMACE(MagneticMACE):
                 "one_body_magmom_const_correction",
                 torch.zeros(len(self.atomic_numbers), len(self.heads)),
             )
+
+    def onebody_curvature_penalty(self, n_grid: int = 64) -> torch.Tensor:
+        """Mean squared discrete second derivative of the one-body magmom energy curve
+        E(|m|) over |m| in [0, m_max], summed over species and heads.
+
+        E(|m|) is linear in ``onebody_magmombasis_coeffs``, so this is a smooth quadratic
+        (Tikhonov-style) roughness penalty. Adding it to the training loss damps the
+        unconstrained Chebyshev ringing of the one-body head, especially in the large-|m|
+        extrapolation regions of near-nonmagnetic elements. Independent of the batch.
+        """
+        if not hasattr(self, "one_body_cheb_basis_with_const"):
+            return self.onebody_magmombasis_coeffs.new_zeros(())
+        coeffs = self.onebody_magmombasis_coeffs  # (S, B, H)
+        device, dtype = coeffs.device, coeffs.dtype
+        x = torch.linspace(0.0, 1.0, n_grid, device=device, dtype=dtype)
+        trans = 1.0 - 2.0 * x**2
+        radials = self.one_body_cheb_basis_with_const(trans.unsqueeze(-1))
+        radials = radials.reshape(n_grid, -1).to(dtype)  # (n_grid, B)
+        curve = torch.einsum("gb,sbh->sgh", radials, coeffs)  # (S, n_grid, H)
+        d2 = curve[:, 2:, :] - 2.0 * curve[:, 1:-1, :] + curve[:, :-2, :]
+        return (d2**2).mean()
+
+    def one_body_zero_offset(self) -> torch.Tensor:
+        """Per-species, per-head value of the one-body curve at |m| = 0.
+
+        At zero moment the transform is trans = 1 - 2*(0)**2 = 1, and every Chebyshev basis
+        function satisfies T_b(1) = 1, so the offset is just sum_b coeff[s, b, h].
+        Subtracting it makes the one-body term vanish at |m| = 0, removing the constant
+        (m^0) component and leaving a pure even-power correction m^2 + m^4 + ...
+        """
+        coeffs = self.onebody_magmombasis_coeffs  # (S, B, H)
+        ones = self.one_body_cheb_basis_with_const(coeffs.new_ones(1, 1)).reshape(1, -1)
+        return torch.einsum("gb,sbh->sh", ones, coeffs)  # (S, H)
 
     def forward(
         self,
@@ -1871,11 +1950,15 @@ class MagneticScaleShiftMACE(MagneticMACE):
                         data["node_attrs"],
                         self.onebody_magmombasis_coeffs,
                     )
-                    #
+                    if getattr(self, "pin_one_body_zero", False):
+                        # pure even-power term: subtract E(|m|=0) so no constant survives
+                        _off = self.one_body_zero_offset()  # (S, H)
+                    else:
+                        _off = self.one_body_magmom_const_correction
                     one_body_correction = torch.einsum(
                         "ns,sh->nh",
                         data["node_attrs"],
-                        self.one_body_magmom_const_correction,
+                        _off,
                     )
 
                     # Compute dot product over nbasis → (n_nodes, num_heads)
@@ -2103,3 +2186,333 @@ class MagneticSCFMACE(torch.nn.Module):
         final_output["equilibrated_magmom"] = magmom.detach()
 
         return final_output
+
+
+class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
+    """Non-spin-orbit-coupled magnetic model.
+
+    Mirrors the old non-SOC model's per-layer design, using existing blocks:
+      * first interaction:  interaction_cls_first (a plain, non-magnetic block such as
+        RealAgnosticDensityInteractionBlock) + contraction_cls_first (SymmetricContraction).
+        The magnetic moment does NOT enter at layer 0; the layer builds purely geometric
+        features, well-normalized by avg_num_neighbors.
+      * later interactions: interaction_cls (MagneticRealAgnosticNonSpinOrbitCoupled...)
+        + contraction_cls (NonSOCSymmetricContraction), which contracts the spatial and
+        magmom angular channels through separate CG paths -> energy invariant under
+        rotating magnetic moments independently of positions (no spin-orbit coupling).
+
+    Requires scalar hidden_irreps (the NonSOC contraction enforces irrep_out.lmax == 0).
+    """
+
+    def __init__(self, **kwargs):
+        hidden_irreps = kwargs["hidden_irreps"]  # single Irreps or per-layer list
+        # A per-layer LIST must not reach the base: o3.Irreps subclasses tuple, so the base's
+        # ``hidden_irreps.count(o3.Irrep(0, 1))`` silently resolves to list.count() on a plain
+        # list and returns 0. That yields node_feats_irreps="0x0e" -- an empty Irreps -- and
+        # the failure only surfaces much later as "max() iterable argument is empty". Hand the
+        # base a single valid Irreps and keep the per-layer list for the rebuild below.
+        if not isinstance(hidden_irreps, o3.Irreps) and isinstance(
+            hidden_irreps, (list, tuple)
+        ):
+            kwargs["hidden_irreps"] = o3.Irreps(hidden_irreps[0])
+        correlation = kwargs["correlation"]
+        first_cls = kwargs["interaction_cls_first"]
+        inter_cls = kwargs["interaction_cls"]
+        contraction_cls = kwargs.pop("contraction_cls", "NonSOCSymmetricContraction")
+        contraction_cls_first = kwargs.pop(
+            "contraction_cls_first", "SymmetricContraction"
+        )
+
+        first_is_magnetic = "Magnetic" in getattr(first_cls, "__name__", str(first_cls))
+        # The base passes magmom kwargs to interaction_cls_first; a plain (non-magnetic)
+        # block rejects them, so build the base with a magnetic-compatible first
+        # interaction and rebuild layer 0 below.
+        if not first_is_magnetic:
+            kwargs["interaction_cls_first"] = inter_cls
+        super().__init__(**kwargs)
+
+        n = len(self.interactions)
+        if isinstance(correlation, int):
+            correlation = [correlation] * n
+        magmom_inv_irreps = o3.Irreps(f"{self.mag_radial_embedding.num_basis}x0e")
+        # Spatial and spin angular axes are kept separate: this implements
+        # O(3)_space x O(3)_spin, so the spin axis takes natural spherical-harmonic parity.
+        magmom_attrs_irreps = o3.Irreps.spherical_harmonics(
+            self.mag_solid_harmoics.SH.l_max()
+        )
+
+        # Rebuild layer-0 interaction as the real (plain) first block, without magmom.
+        if not first_is_magnetic:
+            i0 = self.interactions[0]
+            self.interactions[0] = first_cls(
+                node_attrs_irreps=i0.node_attrs_irreps,
+                node_feats_irreps=i0.node_feats_irreps,
+                edge_attrs_irreps=i0.edge_attrs_irreps,
+                edge_feats_irreps=i0.edge_feats_irreps,
+                target_irreps=i0.target_irreps,
+                hidden_irreps=i0.hidden_irreps,
+                avg_num_neighbors=i0.avg_num_neighbors,
+                radial_MLP=i0.radial_MLP,
+                cueq_config=getattr(i0, "cueq_config", None),
+            )
+
+        # Per-layer hidden irreps (single value -> uniform list; backward compatible).
+        # NB: o3.Irreps subclasses tuple, so check it before list/tuple.
+        if isinstance(hidden_irreps, o3.Irreps):
+            hidden_list = [hidden_irreps] * n
+        elif isinstance(hidden_irreps, (list, tuple)):
+            hidden_list = [o3.Irreps(h) for h in hidden_irreps]
+        else:
+            hidden_list = [o3.Irreps(hidden_irreps)] * n
+
+        # Rebuild products per layer with the requested contraction class.
+        use_sc_first = "Residual" in str(first_cls)
+        products = torch.nn.ModuleList()
+        for i, inter in enumerate(self.interactions):
+            # last layer keeps only scalars for the readout
+            target_irreps = (
+                o3.Irreps(str(hidden_list[i][0])) if i == n - 1 else hidden_list[i]
+            )
+            cc = contraction_cls_first if i == 0 else contraction_cls
+            products.append(
+                EquivariantProductBasisNonSOCWithSelfMagmomBlock(
+                    node_feats_irreps=inter.target_irreps,
+                    target_irreps=target_irreps,
+                    correlation=correlation[i],
+                    use_sc=use_sc_first if i == 0 else True,
+                    num_elements=len(self.atomic_numbers),
+                    cueq_config=None,
+                    magmom_node_inv_feats_irreps=magmom_inv_irreps,
+                    magmom_node_attrs_irreps=magmom_attrs_irreps,
+                    contraction_cls=cc,
+                    radial_MLP=getattr(i0, "radial_MLP", None),
+                )
+            )
+        # SCALAR node features only, for every MAGNETIC layer.
+        #
+        # A magnetic non-SOC block builds its magnetic message with
+        #     conv_tp_m = TensorProduct(node_feats_irreps, magmom_node_attrs_irreps)
+        # and uses the result as the SPIN axis of
+        #     A_msg = einsum("bkl,bkp->bklp", r_msg, m_msg).
+        # With scalar node features that product is a channel mix of the magmom attributes,
+        # so the spin axis is spin-only. With lmax > 0 it also carries SPATIAL content, which
+        # the contraction then reduces against the magmom CG basis, and the energy stops being
+        # invariant under a spatial rotation.
+        #
+        # The check must be on each magnetic layer's INPUT, not on its own target: the input
+        # is the PREVIOUS layer's output, so an L>0 earlier layer contaminates a magnetic
+        # layer whose own target is scalar (e.g. per-layer ["128x0e+128x1o", "128x0e"]).
+        for i, inter in enumerate(self.interactions):
+            if not hasattr(inter, "conv_tp_m"):
+                continue
+            in_irreps = o3.Irreps(inter.node_feats_irreps)
+            assert in_irreps.lmax == 0, (
+                f"magnetic layer {i} receives node_feats={in_irreps} (lmax={in_irreps.lmax}); "
+                "the non-SOC model supports SCALAR node features into magnetic layers only. "
+                "Non-scalar features leak spatial content into the spin axis of A_msg and "
+                "break rotational invariance."
+            )
+
+        self.products = products
+
+    def _saturate_magmom(
+        self, magmom: torch.Tensor, node_attrs: torch.Tensor
+    ) -> torch.Tensor:
+        """Angle-preserving bounded saturation of the moment fed to the solid harmonics,
+        ``m_eff = m / sqrt(1 + |m|^2 / m_sat^2)``: same direction, magnitude -> |m| for
+        small moments and -> m_sat for large ones, so the cubic interaction term is
+        bounded below. Written as vector * scalar(|m|^2), so it is smooth through m = 0
+        with no norm and no 0/0. Identity when the ``m_sat`` buffer is absent, which is
+        the default here, so the raw moment is used unless saturation is switched on.
+        """
+        m_sat = getattr(self, "m_sat", None)
+        if m_sat is None:
+            return magmom
+        s = m_sat[torch.argmax(node_attrs, dim=1)].unsqueeze(-1)
+        m2 = (magmom * magmom).sum(dim=-1, keepdim=True)
+        return magmom / torch.sqrt(1.0 + m2 / (s * s))
+
+    def forward(
+        self,
+        data: Dict[str, torch.Tensor],
+        training: bool = False,
+        compute_force: bool = True,
+        compute_virials: bool = False,
+        compute_stress: bool = False,
+        compute_displacement: bool = False,
+        compute_hessian: bool = False,
+        compute_magforces: bool = True,
+        compute_edge_forces: bool = False,
+        compute_atomic_stresses: bool = False,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        data["positions"].requires_grad_(True)
+        data["node_attrs"].requires_grad_(True)
+        data["magmom"].requires_grad_(True)
+
+        num_graphs = data["ptr"].numel() - 1
+        num_atoms_arange = torch.arange(data["positions"].shape[0])
+        node_heads = (
+            data["head"][data["batch"]]
+            if "head" in data
+            else torch.zeros_like(data["batch"])
+        )
+        displacement = torch.zeros(
+            (num_graphs, 3, 3),
+            dtype=data["positions"].dtype,
+            device=data["positions"].device,
+        )
+        if compute_virials or compute_stress or compute_displacement:
+            (
+                data["positions"],
+                data["shifts"],
+                displacement,
+            ) = get_symmetric_displacement(
+                positions=data["positions"],
+                unit_shifts=data["unit_shifts"],
+                cell=data["cell"],
+                edge_index=data["edge_index"],
+                num_graphs=num_graphs,
+                batch=data["batch"],
+            )
+
+        node_e0 = self.atomic_energies_fn(data["node_attrs"])[
+            num_atoms_arange, node_heads
+        ]
+        e0 = scatter_sum(src=node_e0, index=data["batch"], dim=0, dim_size=num_graphs)
+
+        node_feats = self.node_embedding(data["node_attrs"])
+        vectors, lengths = get_edge_vectors_and_lengths(
+            positions=data["positions"],
+            edge_index=data["edge_index"],
+            shifts=data["shifts"],
+        )
+        edge_attrs = self.spherical_harmonics(vectors)
+        edge_feats, _ = self.radial_embedding(
+            lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+        )
+        if hasattr(self, "pair_repulsion"):
+            pair_node_energy = self.pair_repulsion_fn(
+                lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+            )
+        else:
+            pair_node_energy = torch.zeros_like(node_e0)
+
+        # --- magnetic features ---
+        magmom_lenghts = torch.norm(data["magmom"], dim=-1, keepdim=True)
+        element_dependent_scaling = self.m_max[
+            torch.argmax(data["node_attrs"], dim=1)
+        ].unsqueeze(-1)
+        element_dependent_scaling.requires_grad_(True)
+        element_dependent_scaling.retain_grad()
+        magmom_lenghts_trans = (
+            1
+            - 2
+            * torch.clamp(magmom_lenghts / element_dependent_scaling, min=0.0, max=1.0)
+            ** 2
+        )
+        magmom_node_attrs = self.mag_solid_harmoics(
+            self._saturate_magmom(data["magmom"], data["node_attrs"])
+        )
+        magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans)
+        if hasattr(self, "one_body_cheb_basis_with_const"):
+            magmom_one_body_radials = self.one_body_cheb_basis_with_const(
+                magmom_lenghts_trans
+            )
+
+        node_es_list = [pair_node_energy]
+        node_feats_list = []
+        for idx, (interaction, product, readout) in enumerate(
+            zip(self.interactions, self.products, self.readouts)
+        ):
+            # Plain (non-magnetic) interactions do not accept magmom features; the magnetic
+            # moment enters those layers only via the product's non-SOC contraction.
+            if "Magnetic" in interaction.__class__.__name__:
+                node_feats, sc = interaction(
+                    node_attrs=data["node_attrs"],
+                    node_feats=node_feats,
+                    edge_attrs=edge_attrs,
+                    edge_feats=edge_feats,
+                    edge_index=data["edge_index"],
+                    magmom_node_inv_feats=magmom_node_feats,
+                    magmom_node_attrs=magmom_node_attrs,
+                )
+            else:
+                node_feats, sc = interaction(
+                    node_attrs=data["node_attrs"],
+                    node_feats=node_feats,
+                    edge_attrs=edge_attrs,
+                    edge_feats=edge_feats,
+                    edge_index=data["edge_index"],
+                )
+
+            node_feats = product(
+                node_feats=node_feats,
+                sc=sc,
+                node_attrs=data["node_attrs"],
+                magmom_node_inv_feats=magmom_node_feats,
+                magmom_node_attrs=magmom_node_attrs,
+            )
+            node_feats_list.append(node_feats)
+            if idx == (len(self.readouts) - 1) and hasattr(
+                self, "one_body_cheb_basis_with_const"
+            ):
+                selected_coeffs = torch.einsum(
+                    "ns,sbh->nbh", data["node_attrs"], self.onebody_magmombasis_coeffs
+                )
+                if getattr(self, "pin_one_body_zero", False):
+                    _off = self.one_body_zero_offset()  # (S, H)
+                else:
+                    _off = self.one_body_magmom_const_correction
+                one_body_correction = torch.einsum(
+                    "ns,sh->nh", data["node_attrs"], _off
+                )
+                # bound above under the same hasattr guard
+                radials = magmom_one_body_radials  # pylint: disable=possibly-used-before-assignment
+                onebody_magmom_contri = (radials.unsqueeze(-1) * selected_coeffs).sum(
+                    dim=1
+                ) - one_body_correction
+                node_es_list.append(
+                    readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+                    + onebody_magmom_contri[num_atoms_arange, node_heads]
+                )
+            else:
+                node_es_list.append(
+                    readout(node_feats, node_heads)[num_atoms_arange, node_heads]
+                )
+
+        node_feats_out = torch.cat(node_feats_list, dim=-1)
+        node_inter_es = torch.sum(torch.stack(node_es_list, dim=0), dim=0)
+        node_inter_es = self.scale_shift(node_inter_es, node_heads)
+        inter_e = scatter_sum(
+            src=node_inter_es, index=data["batch"], dim=-1, dim_size=num_graphs
+        )
+        total_energy = e0 + inter_e
+        node_energy = node_e0 + node_inter_es
+        forces, virials, stress, hessian, edge_forces, magforces = get_outputs(
+            energy=inter_e,
+            positions=data["positions"],
+            displacement=displacement,
+            vectors=vectors,
+            cell=data["cell"],
+            magmoms=data["magmom"],
+            training=training,
+            compute_force=compute_force,
+            compute_virials=compute_virials,
+            compute_stress=compute_stress,
+            compute_hessian=compute_hessian,
+            compute_edge_forces=compute_edge_forces or compute_atomic_stresses,
+            compute_magforces=compute_magforces,
+        )
+        return {
+            "energy": total_energy,
+            "node_energy": node_energy,
+            "interaction_energy": inter_e,
+            "forces": forces,
+            "magforces": magforces,
+            "edge_forces": edge_forces,
+            "virials": virials,
+            "stress": stress,
+            "hessian": hessian,
+            "displacement": displacement,
+            "node_feats": node_feats_out,
+        }

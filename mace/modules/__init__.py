@@ -12,6 +12,7 @@ from .blocks import (
     LinearLesReadoutBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
+    MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
     MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
     NonLinearBiasReadoutBlock,
@@ -30,6 +31,7 @@ from .blocks import (
 )
 from .extensions import (
     MACELES,
+    MagneticNonSOCScaleShiftMACE,
     MagneticScaleShiftMACE,
     MagneticSCFMACE,
     PolarMACE,
@@ -74,6 +76,7 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "RealAgnosticDensityInteractionBlock": RealAgnosticDensityInteractionBlock,
     "RealAgnosticDensityResidualInteractionBlock": RealAgnosticDensityResidualInteractionBlock,
     "RealAgnosticResidualNonLinearInteractionBlock": RealAgnosticResidualNonLinearInteractionBlock,
+    "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
     "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
 }
@@ -123,6 +126,7 @@ __all__ = [
     "AtomicDipolesMACE",
     "AtomicDielectricMACE",
     "EnergyDipolesMACE",
+    "MagneticNonSOCScaleShiftMACE",
     "MagneticScaleShiftMACE",
     "MagneticSCFMACE",
     "PolarMACE",
