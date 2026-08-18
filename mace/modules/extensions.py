@@ -1455,6 +1455,7 @@ class MagneticMACE(torch.nn.Module):
         use_embedding_readout: bool = False,
         distance_transform: str = "None",
         use_magmom_one_body: Optional[bool] = False,
+        enforce_time_reversal: bool = False,
         edge_irreps: Optional[o3.Irreps] = None,
         use_edge_irreps_first: bool = False,  # pylint: disable=unused-argument
         radial_MLP: Optional[List[int]] = None,
@@ -1557,6 +1558,25 @@ class MagneticMACE(torch.nn.Module):
         # parity selection rules of every downstream tensor product, so mislabelling them as
         # 1o admits spin-space couplings that violate inversion symmetry (ACEsuit/mace#1647).
         magmom_sh_irreps = o3.Irreps.spherical_harmonics(max_m_ell, p=1)
+
+        # Time reversal (m -> -m) is a symmetry of a magnetic energy with no external
+        # field: exchange, anisotropy and Dzyaloshinskii-Moriya terms are all even in the
+        # moments; only a Zeeman term -B.m is odd. It is INDEPENDENT of the O(3) parity
+        # above -- e3nn tracks rotations and inversion, not time reversal -- so a term
+        # like (r_i x r_j).m_k is a legitimate O(3) scalar that e3nn admits even though
+        # it is time-reversal odd. Y_l(-m) = (-1)**l Y_l(m), so these signs map the
+        # magmom harmonics onto their time-reversed partner; used in forward().
+        self.register_buffer(
+            "magmom_tr_signs",
+            torch.cat(
+                [
+                    torch.full((2 * ir.l + 1,), float((-1) ** ir.l))
+                    for mul, ir in magmom_sh_irreps
+                    for _ in range(mul)
+                ]
+            ),
+        )
+        self.enforce_time_reversal = bool(enforce_time_reversal)
 
         # simplify this later
         self.mag_solid_harmoics = SHModule(
@@ -1845,66 +1865,101 @@ class MagneticScaleShiftMACE(MagneticMACE):
             )
 
         # Interactions
-        node_es_list = [pair_node_energy]
-        node_feats_list = []
+        # Time-reversal symmetrisation.
+        #
+        # Everything magmom-derived above depends on |m| alone and is therefore already
+        # even under m -> -m. The harmonics are the ONLY time-reversal-odd input, with
+        # Y_l(-m) = (-1)**l Y_l(m), so averaging the node energies over the two signs
+        # projects the energy exactly onto its time-reversal-even sector.
+        #
+        # Note this is NOT the same as dropping odd-l harmonics, which would also remove
+        # plain Heisenberg exchange -- m_i.m_j needs l=1 on both sites -- along with
+        # Dzyaloshinskii-Moriya and 120-degree order. Those are all even in TOTAL degree
+        # and survive here; only the odd-degree sector is projected out.
+        #
+        # Doing it before get_outputs means forces and magnetic forces are differentiated
+        # from the symmetrised energy and inherit the symmetry. Costs one extra pass
+        # through the interaction stack when enabled.
+        _tr_variants = (
+            (magmom_node_attrs, magmom_node_attrs * self.magmom_tr_signs)
+            if getattr(self, "enforce_time_reversal", False)
+            else (magmom_node_attrs,)
+        )
+        _node_es_sum = None
+        _node_feats_in = node_feats
+        for magmom_attrs_cur in _tr_variants:
+            node_feats = _node_feats_in
+            node_es_list = [pair_node_energy]
+            node_feats_list = []
 
-        for idx, (interaction, product, readout) in enumerate(
-            zip(self.interactions, self.products, self.readouts)
-        ):
-            node_feats, sc = interaction(
-                node_attrs=data["node_attrs"],
-                node_feats=node_feats,
-                edge_attrs=edge_attrs,
-                edge_feats=edge_feats,
-                edge_index=data["edge_index"],
-                magmom_node_inv_feats=magmom_node_feats,
-                magmom_node_attrs=magmom_node_attrs,
-            )
+            for idx, (interaction, product, readout) in enumerate(
+                zip(self.interactions, self.products, self.readouts)
+            ):
+                node_feats, sc = interaction(
+                    node_attrs=data["node_attrs"],
+                    node_feats=node_feats,
+                    edge_attrs=edge_attrs,
+                    edge_feats=edge_feats,
+                    edge_index=data["edge_index"],
+                    magmom_node_inv_feats=magmom_node_feats,
+                    magmom_node_attrs=magmom_attrs_cur,
+                )
 
-            node_feats = product(
-                node_feats=node_feats,
-                sc=sc,
-                node_attrs=data["node_attrs"],
-                magmom_node_inv_feats=magmom_node_feats,
-                magmom_node_attrs=magmom_node_attrs,
-            )
+                node_feats = product(
+                    node_feats=node_feats,
+                    sc=sc,
+                    node_attrs=data["node_attrs"],
+                    magmom_node_inv_feats=magmom_node_feats,
+                    magmom_node_attrs=magmom_attrs_cur,
+                )
 
-            node_feats_list.append(node_feats)
-            if idx == (len(self.readouts) - 1):
-                if hasattr(self, "one_body_cheb_basis_with_const"):
-                    selected_coeffs = torch.einsum(
-                        "ns,sbh->nbh",
-                        data["node_attrs"],
-                        self.onebody_magmombasis_coeffs,
-                    )
-                    #
-                    one_body_correction = torch.einsum(
-                        "ns,sh->nh",
-                        data["node_attrs"],
-                        self.one_body_magmom_const_correction,
-                    )
+                node_feats_list.append(node_feats)
+                if idx == (len(self.readouts) - 1):
+                    if hasattr(self, "one_body_cheb_basis_with_const"):
+                        selected_coeffs = torch.einsum(
+                            "ns,sbh->nbh",
+                            data["node_attrs"],
+                            self.onebody_magmombasis_coeffs,
+                        )
+                        #
+                        one_body_correction = torch.einsum(
+                            "ns,sh->nh",
+                            data["node_attrs"],
+                            self.one_body_magmom_const_correction,
+                        )
 
-                    # Compute dot product over nbasis → (n_nodes, num_heads)
-                    onebody_magmom_contri = (
-                        magmom_one_body_radials.unsqueeze(-1) * selected_coeffs
-                    ).sum(dim=1)
+                        # Compute dot product over nbasis → (n_nodes, num_heads)
+                        onebody_magmom_contri = (
+                            magmom_one_body_radials.unsqueeze(-1) * selected_coeffs
+                        ).sum(dim=1)
 
-                    # apply optional correction so that the zero matches E0 exactly
-                    onebody_magmom_contri -= one_body_correction
+                        # apply optional correction so that the zero matches E0 exactly
+                        onebody_magmom_contri -= one_body_correction
 
-                    # Gather energy per atom + one-body magmom contribution for each head
-                    node_es_list.append(
-                        readout(node_feats, node_heads)[num_atoms_arange, node_heads]
-                        + onebody_magmom_contri[num_atoms_arange, node_heads]
-                    )
+                        # Gather energy per atom + one-body magmom contribution for each head
+                        node_es_list.append(
+                            readout(node_feats, node_heads)[
+                                num_atoms_arange, node_heads
+                            ]
+                            + onebody_magmom_contri[num_atoms_arange, node_heads]
+                        )
+                    else:
+                        node_es_list.append(
+                            readout(node_feats, node_heads)[
+                                num_atoms_arange, node_heads
+                            ]
+                        )
                 else:
                     node_es_list.append(
                         readout(node_feats, node_heads)[num_atoms_arange, node_heads]
-                    )
+                    )  # {[n_nodes, ], }
+
+            if _node_es_sum is None:
+                _node_es_sum = node_es_list
             else:
-                node_es_list.append(
-                    readout(node_feats, node_heads)[num_atoms_arange, node_heads]
-                )  # {[n_nodes, ], }
+                _node_es_sum = [a + b for a, b in zip(_node_es_sum, node_es_list)]
+        if len(_tr_variants) > 1:
+            node_es_list = [e / len(_tr_variants) for e in _node_es_sum]
 
         # Concatenate node features
         node_feats_out = torch.cat(node_feats_list, dim=-1)

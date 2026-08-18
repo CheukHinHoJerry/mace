@@ -79,7 +79,7 @@ def _batch(pos, mag):
     }
 
 
-def _build(hidden, seed=1):
+def _build(hidden, seed=1, enforce_time_reversal=False):
     torch.manual_seed(seed)
     blk = interaction_classes[
         "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock"
@@ -106,6 +106,7 @@ def _build(hidden, seed=1):
         atomic_inter_shift=0.0,
         atomic_inter_scale=1.0,
         use_magmom_one_body=False,
+        enforce_time_reversal=enforce_time_reversal,
     )
 
 
@@ -315,19 +316,87 @@ def test_o3_invariance_on_physical_magnetic_states(state, name, R):
 
 
 # --------------------------------------------------------------------------------------
-# Known, SEPARATE symmetry gap -- deliberately recorded as xfail rather than hidden.
+# Time reversal. A SECOND symmetry, independent of O(3): e3nn tracks rotations and
+# inversion, not m -> -m, so terms like (r_i x r_j).m_k are legitimate O(3) scalars that
+# parity bookkeeping admits even though they are time-reversal odd. With no external
+# field the magnetic energy must be even in the moments, so those terms are spurious.
 # --------------------------------------------------------------------------------------
-@pytest.mark.xfail(
-    reason="Time-reversal symmetry is NOT enforced by O(3) parity and is currently "
-    "violated. Terms linear in the moments, e.g. (r_i x r_j).m_k, are legitimate O(3) "
-    "scalars, so e3nn's bookkeeping admits them, but they are odd under m -> -m, which "
-    "should be a symmetry of a magnetic energy with no external field. Fixing it needs "
-    "an explicit constraint (energy symmetrisation over +-m, or typing features by "
-    "time-reversal parity) and is independent of the axial-parity fix.",
-    strict=True,
-)
 @pytest.mark.parametrize("hidden", ["8x0e+8x1o", "8x0e+8x1o+8x1e"])
-def test_energy_is_time_reversal_invariant(hidden):
-    """E(r, -m) == E(r, m) for a closed magnetic system with no external field."""
-    model = _build(hidden)
+def test_time_reversal_is_exact_when_enforced(hidden):
+    """E(r, -m) == E(r, m) to machine precision with enforce_time_reversal=True."""
+    model = _build(hidden, enforce_time_reversal=True)
     assert abs(_energy(model, _POS, -_MAG) - _energy(model, _POS, _MAG)) < _TOL
+
+
+@pytest.mark.parametrize("hidden", ["8x0e+8x1o", "8x0e+8x1o+8x1e"])
+def test_time_reversal_is_violated_by_default(hidden):
+    """Without the flag the odd sector is present -- the flag is doing real work.
+
+    Guards against the symmetrisation silently becoming a no-op (e.g. if the sign buffer
+    were all ones), which would make the test above pass for the wrong reason.
+    """
+    model = _build(hidden, enforce_time_reversal=False)
+    assert abs(_energy(model, _POS, -_MAG) - _energy(model, _POS, _MAG)) > _TOL
+
+
+def test_time_reversal_signs_follow_minus_one_to_the_l():
+    """Y_l(-m) = (-1)**l Y_l(m): even-l blocks keep sign, odd-l blocks flip."""
+    model = _build("8x0e+8x1o", enforce_time_reversal=True)
+    lmax = model.mag_solid_harmoics.SH.l_max()
+    expected = np.concatenate(
+        [np.full(2 * l + 1, (-1.0) ** l) for l in range(lmax + 1)]
+    )
+    assert np.allclose(model.magmom_tr_signs.numpy(), expected)
+
+
+@pytest.mark.parametrize("name,R", _IMPROPER)
+def test_time_reversal_and_o3_hold_together(name, R):
+    """Enforcing one symmetry must not break the other."""
+    model = _build("8x0e+8x1o", enforce_time_reversal=True)
+    base = _energy(model, _POS, _MAG)
+    det = float(np.linalg.det(R))
+    assert abs(_energy(model, _POS @ R.T, det * (_MAG @ R.T)) - base) < _TOL, name
+    assert abs(_energy(model, _POS, -_MAG) - base) < _TOL
+
+
+def test_time_reversal_keeps_the_even_physics():
+    """The projection removes only the odd sector.
+
+    Exchange (m_i.m_j), anisotropy ((m.n)^2), Dzyaloshinskii-Moriya (D.(m_i x m_j)) and
+    the scalar spin chirality are all EVEN in total degree and must survive. This is why
+    the fix cannot be "drop the odd-l harmonics": m_i.m_j needs l=1 on both sites.
+    """
+    model = _build("8x0e+8x1o", enforce_time_reversal=True)
+    base = _energy(model, _POS, _MAG)
+
+    def umbrella(sign, theta=50.0):
+        th = np.radians(theta)
+        v = [
+            [np.sin(th) * np.cos(np.radians(p)), np.sin(th) * np.sin(np.radians(p)), np.cos(th)]
+            for p in [0, 120, 240][::sign]
+        ]
+        return 2.2 * np.array(v)
+
+    rot = _MAG.copy()
+    rot[0] = Rot.from_euler("z", 90, degrees=True).as_matrix() @ rot[0]
+    checks = {
+        "exchange": abs(_energy(model, _POS, rot) - base),
+        "anisotropy": abs(
+            _energy(model, _POS, _MAG @ Rot.from_euler("y", 90, degrees=True).as_matrix().T) - base
+        ),
+        "chirality": abs(_energy(model, _POS, umbrella(1)) - _energy(model, _POS, umbrella(-1))),
+        "|m| response": abs(_energy(model, _POS, _MAG * 0.5) - base),
+    }
+    dead = [k for k, v in checks.items() if v <= _TOL]
+    assert not dead, f"time-reversal projection also removed: {dead} ({checks})"
+
+
+@pytest.mark.parametrize("name,R", _PROPER + _IMPROPER)
+def test_gradients_stay_covariant_with_time_reversal_on(name, R):
+    """Symmetrising before get_outputs must leave the gradient laws intact."""
+    model = _build("8x0e+8x1o", enforce_time_reversal=True)
+    det = float(np.linalg.det(R))
+    f0, g0 = _energy_and_grads(model, _POS, _MAG)
+    f1, g1 = _energy_and_grads(model, _POS @ R.T, det * (_MAG @ R.T))
+    assert np.abs(f1 - f0 @ R.T).max() < 1e-9, f"forces not polar under {name}"
+    assert np.abs(g1 - det * (g0 @ R.T)).max() < 1e-9, f"magforces not axial under {name}"
