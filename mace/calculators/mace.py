@@ -10,7 +10,7 @@ import logging
 import os
 from glob import glob
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Union
 
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
@@ -119,9 +119,28 @@ class MACECalculator(Calculator):
         pad_num_atoms: int = 0,
         pad_num_edges: int = 0,
         warmup: bool = False,
+        compute_bec: bool = False,
+        external_field: Union[list, None] = None,
+        eps_infty: float = None,
+        electric_field_unit: float = 1.0,
+        keep_neutral: bool = True,
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
+        self.compute_bec = compute_bec
+        if external_field is not None:
+            external_field = np.asarray(external_field, dtype=np.float64).reshape(
+                -1
+            )  # (3,) vector
+            if external_field.size != 3:
+                raise ValueError(
+                    "external_field must be a 3-vector [Ex, Ey, Ez]; "
+                    f"got {external_field.size} component(s)"
+                )
+        self.external_field = external_field
+        self.eps_infty = eps_infty
+        self.electric_field_unit = electric_field_unit
+        self.keep_neutral = keep_neutral
 
         self._enable_cueq = enable_cueq
         self._enable_oeq = enable_oeq
@@ -216,6 +235,8 @@ class MACECalculator(Calculator):
                     "polarizability_sh",
                 ]
             )
+        if getattr(self, "compute_bec", False):
+            self.implemented_properties.append("bec")
 
         if model_paths is not None:
             if isinstance(model_paths, str):
@@ -265,7 +286,7 @@ class MACECalculator(Calculator):
         r_maxs = [model.r_max.cpu() for model in self.models]
         r_maxs = np.array(r_maxs)
         if not np.all(r_maxs == r_maxs[0]):
-            raise ValueError(f"committee r_max are not all the same {' '.join(r_maxs)}")
+            raise ValueError(f"committee r_max are not all the same {r_maxs.tolist()}")
         self.r_max = float(r_maxs[0])
 
         self.device = torch_tools.init_device(device)
@@ -449,6 +470,15 @@ class MACECalculator(Calculator):
             "atomic_dipoles",
             "node_feats",
             "fukui_functions",
+            # LES outputs are per-atom too. BEC, latent_alphas and
+            # latent_kappas are the three that reach self.results; the rest
+            # are listed so a future consumer does not inherit padded rows.
+            "BEC",
+            "latent_alphas",
+            "latent_kappas",
+            "latent_charges",
+            "latent_dipoles",
+            "latent_quads",
         }
         sliced: Dict[str, Union[torch.Tensor, None]] = {}
         for key, value in out.items():
@@ -500,6 +530,15 @@ class MACECalculator(Calculator):
                 dtype=out[key].dtype,
             )
 
+        for key in ("latent_alphas", "latent_kappas", "BEC"):
+            if out.get(key) is not None:
+                dict_of_tensors[key] = torch.zeros(
+                    num_models,
+                    *out[key].shape,
+                    device=self.device,
+                    dtype=out[key].dtype,
+                )
+
         node_e0 = None
         if "node_energy" in out:
             node_heads = batch["head"][batch["batch"]][:num_atoms]
@@ -534,7 +573,9 @@ class MACECalculator(Calculator):
         )
 
     def _atoms_to_batch(self, atoms):
-        self.arrays_keys.update({self.charges_key: "charges"})
+        # arrays_keys maps property name -> atoms.arrays key, not the reverse:
+        # config_from_atoms reads atoms.arrays[value] into properties[key].
+        self.arrays_keys.update({"charges": self.charges_key})
         keyspec = mace_data.KeySpecification(
             info_keys=self.info_keys, arrays_keys=self.arrays_keys
         )
@@ -641,13 +682,28 @@ class MACECalculator(Calculator):
                 displacement = displacement + positions.sum() * 0.0
                 batch_dict["displacement"] = displacement
 
-            model_kwargs = {
+            if getattr(self, "external_field", None) is not None:
+                batch_dict["external_field"] = torch.tensor(
+                    self.external_field,
+                    device=batch_dict["positions"].device,
+                    dtype=batch_dict["positions"].dtype,
+                )
+
+            model_kwargs: Dict[str, Any] = {
                 "compute_stress": compute_stress,
                 "training": self.use_compile and not oeq_compile,
                 "compute_edge_forces": self.compute_atomic_stresses,
                 "compute_atomic_stresses": self.compute_atomic_stresses,
             }
-            out = model(batch_dict, **model_kwargs)
+            if getattr(self, "compute_bec", False):
+                model_kwargs["compute_bec"] = True
+
+            # Scoped here too, not only around batch construction: extensions
+            # create tensors mid-forward without a dtype (les does, for its
+            # 3x3 identities) and would follow the process-wide default. The
+            # mismatch then only surfaces in the backward, from a linalg op.
+            with torch_tools.default_dtype(self.default_dtype):
+                out = model(batch_dict, **model_kwargs)
             if is_padded:
                 out = self._slice_real_outputs(out, num_real_atoms)
             if i == 0:
@@ -741,6 +797,66 @@ class MACECalculator(Calculator):
                     for stress in self.results["stresses"]
                 ]
             )
+        if "latent_alphas" in ret_tensors:
+            self.results["LES_alphas"] = (
+                torch.mean(ret_tensors["latent_alphas"], dim=0).cpu().numpy()
+            )
+        if "latent_kappas" in ret_tensors:
+            self.results["LES_kappas"] = (
+                torch.mean(ret_tensors["latent_kappas"], dim=0).cpu().numpy()
+            )
+        if getattr(self, "compute_bec", False) and "BEC" in ret_tensors:
+            self.results["bec"] = torch.mean(ret_tensors["BEC"], dim=0).cpu().numpy()
+        if (
+            self.external_field is not None
+            and getattr(self, "compute_bec", False)
+            and "bec" in self.results
+        ):
+            bec_output = self.results["bec"]  # [N_atoms, 2, 3, 3] or [N_atoms, 3, 3]
+            if bec_output.ndim == 4:
+                bec_output = np.sum(bec_output, axis=1)
+            if getattr(self, "keep_neutral", False):
+                # Not in place: on the 3-D path bec_output still aliases
+                # self.results["bec"], so -= would neutralise the stored BEC
+                # as a side effect. The 4-D path escapes only because np.sum
+                # copies, which made the same flag behave differently per
+                # BEC layout.
+                bec_output = bec_output - np.mean(bec_output, axis=0)
+            alphas = self.results.get("LES_alphas", None)
+            if getattr(self, "eps_infty", None) is not None and alphas is not None:
+                epsilon_0 = 5.52635e-3
+                volume = atoms.get_volume()
+                alpha_squeezed = np.squeeze(alphas)
+                if alpha_squeezed.ndim == 1:
+                    chi = alpha_squeezed.sum() / volume / epsilon_0
+                elif alpha_squeezed.ndim == 3 and alpha_squeezed.shape[1:] == (3, 3):
+                    chi = np.einsum("icc->", alpha_squeezed) / 3.0 / volume / epsilon_0
+                elif alpha_squeezed.ndim == 2 and alpha_squeezed.shape[-1] == 9:
+                    chi = (
+                        np.einsum("icc->", alpha_squeezed.reshape(-1, 3, 3))
+                        / 3.0
+                        / volume
+                        / epsilon_0
+                    )
+                else:
+                    chi = 0.0
+                epsilon_r = self.eps_infty / (1.0 + chi)
+            else:
+                epsilon_r = (
+                    getattr(self, "eps_infty", 1.0)
+                    if getattr(self, "eps_infty", None) is not None
+                    else 1.0
+                )
+            e_ext_arr = np.array(self.external_field, dtype=np.float64)
+            scaled_e_field = e_ext_arr * (epsilon_r**0.5)
+            electric_field_unit = getattr(self, "electric_field_unit", 1.0)
+            forces_bec = (  # bec_output: [N, i, j] = dP_i/dr_j
+                np.einsum(
+                    "nij,i->nj", bec_output, scaled_e_field
+                )  # F_nj = sum_i Z*_nij E_i
+                * electric_field_unit
+            )
+            self.results["forces"] += forces_bec
 
     def get_dielectric_derivatives(self, atoms=None):
         if atoms is None and self.atoms is None:
@@ -752,14 +868,15 @@ class MACECalculator(Calculator):
                 "Only implemented for DipoleMACE or DipolePolarizabilityMACE models"
             )
         batch = self._atoms_to_batch(atoms)
-        outputs = [
-            model(
-                self._clone_batch(batch).to_dict(),
-                compute_dielectric_derivatives=True,
-                training=self.use_compile,
-            )
-            for model in self.models
-        ]
+        with torch_tools.default_dtype(self.default_dtype):
+            outputs = [
+                model(
+                    self._clone_batch(batch).to_dict(),
+                    compute_dielectric_derivatives=True,
+                    training=self.use_compile,
+                )
+                for model in self.models
+            ]
         dipole_derivatives = [
             output["dmu_dr"].clone().detach().cpu().numpy() for output in outputs
         ]
@@ -785,15 +902,16 @@ class MACECalculator(Calculator):
         if self.model_type not in ["MACE", "PolarMACE"]:
             raise NotImplementedError("Only implemented for MACE/PolarMACE models")
         batch = self._atoms_to_batch(atoms)
-        hessians = [
-            model(
-                self._clone_batch(batch).to_dict(),
-                compute_hessian=True,
-                compute_stress=False,
-                training=self.use_compile,
-            )["hessian"]
-            for model in self.models
-        ]
+        with torch_tools.default_dtype(self.default_dtype):
+            hessians = [
+                model(
+                    self._clone_batch(batch).to_dict(),
+                    compute_hessian=True,
+                    compute_stress=False,
+                    training=self.use_compile,
+                )["hessian"]
+                for model in self.models
+            ]
         hessians = [hessian.detach().cpu().numpy() for hessian in hessians]
         if self.num_models == 1:
             return hessians[0]
@@ -816,7 +934,10 @@ class MACECalculator(Calculator):
         if num_layers == -1:
             num_layers = num_interactions
         batch = self._atoms_to_batch(atoms)
-        descriptors = [model(batch.to_dict())["node_feats"] for model in self.models]
+        with torch_tools.default_dtype(self.default_dtype):
+            descriptors = [
+                model(batch.to_dict())["node_feats"] for model in self.models
+            ]
 
         irreps_out = o3.Irreps(str(self.models[0].products[0].linear.irreps_out))
         l_max = irreps_out.lmax
@@ -885,6 +1006,19 @@ class MagneticMACECalculator(Calculator):
         if enable_cueq:
             assert model_type == "MACE", "CuEq only supports MACE models"
             compile_mode = None
+        if enable_cueq and enable_oeq:
+            raise ValueError(
+                "MagneticMACECalculator has no hybrid cueq+oeq path, "
+                "enable only one of them"
+            )
+        # Without this the converter is None and the call below is a
+        # TypeError on a NoneType instead of naming what is missing.
+        for requested, available, lib in (
+            (enable_cueq, CUEQQ_AVAILABLE, "cuequivariance"),
+            (enable_oeq, OEQ_AVAILABLE, "openequivariance"),
+        ):
+            if requested and not available:
+                raise ImportError(f"{lib} is not installed, cannot accelerate")
         if "model_path" in kwargs:
             deprecation_message = (
                 "'model_path' argument is deprecated, please use 'model_paths'"
@@ -952,17 +1086,13 @@ class MagneticMACECalculator(Calculator):
                 raise ValueError("No mace file names supplied")
             self.num_models = len(model_paths)
 
-            # Load models from files
+            # No conversion here: it happens once further down, after the
+            # dtype change and for the `models=` branch too. Doing it twice
+            # fed a converted model to a converter expecting e3nn layout.
             self.models = [
                 torch.load(f=model_path, map_location=device)
                 for model_path in model_paths
             ]
-            if enable_cueq:
-                logging.info("Converting models to CuEq for acceleration")
-                self.models = [
-                    run_e3nn_to_cueq(model, device=device).to(device)
-                    for model in self.models
-                ]
 
         elif models is not None:
             if not isinstance(models, list):
@@ -1007,7 +1137,7 @@ class MagneticMACECalculator(Calculator):
         ]
         r_maxs = np.array(r_maxs)
         if not np.all(r_maxs == r_maxs[0]):
-            raise ValueError(f"committee r_max are not all the same {' '.join(r_maxs)}")
+            raise ValueError(f"committee r_max are not all the same {r_maxs.tolist()}")
         self.r_max = float(r_maxs[0])
 
         self.device = torch_tools.init_device(device)
@@ -1071,14 +1201,19 @@ class MagneticMACECalculator(Calculator):
                 self.models = [model.double() for model in self.models]
             elif default_dtype == "float32":
                 self.models = [model.float() for model in self.models]
-        torch_tools.set_default_dtype(default_dtype)
+        # Recorded, not applied process-wide. Setting the global dtype here
+        # would reach every other calculator in the session, and would still
+        # leave this one running at whatever dtype happened to be current by
+        # the time it is called. It is scoped around batch construction and
+        # the forward instead, as MACECalculator does.
+        self.default_dtype = default_dtype
         if enable_cueq:
             logging.info("Converting models to CuEq for acceleration")
             self.models = [
                 run_e3nn_to_cueq(model, device=device).to(device)
                 for model in self.models
             ]
-        if enable_oeq:
+        elif enable_oeq:
             logging.info("Converting models to OEq for acceleration")
             self.models = [
                 run_e3nn_to_oeq(model, device=device).to(device)
@@ -1114,9 +1249,25 @@ class MagneticMACECalculator(Calculator):
                     return False
             return True
 
+        def _magmoms_equal(a, b) -> bool:
+            if a is None or b is None:
+                return a is None and b is None
+            a, b = np.asarray(a), np.asarray(b)
+            return a.shape == b.shape and bool(np.allclose(a, b, atol=tol, rtol=0.0))
+
         state = super().check_state(atoms, tol=tol)
         if (not state) and (not _infos_equal(self.atoms.info, atoms.info)):
             state.append("info")
+        # Magmoms are a primary input here, but they live under magmom_key
+        # (REF_magmom by default), which is not one of ASE's all_changes. Left
+        # unchecked, editing them in place returns the cached energy.
+        if (not state) and (
+            not _magmoms_equal(
+                self.atoms.arrays.get(self.magmom_key),
+                atoms.arrays.get(self.magmom_key),
+            )
+        ):
+            state.append(self.magmom_key)
         return state
 
     def _create_result_tensors(
@@ -1158,23 +1309,27 @@ class MagneticMACECalculator(Calculator):
         keyspec = mace_data.KeySpecification(
             info_keys=self.info_keys, arrays_keys=self.arrays_keys
         )
-        config = mace_data.config_from_atoms(
-            atoms, key_specification=keyspec, head_name=self.head
-        )
-        data_loader = torch_geometric.dataloader.DataLoader(
-            dataset=[
-                mace_data.AtomicData.from_config(
-                    config,
-                    z_table=self.z_table,
-                    cutoff=self.r_max,
-                    heads=self.available_heads,
-                )
-            ],
-            batch_size=1,
-            shuffle=False,
-            drop_last=False,
-        )
-        batch = next(iter(data_loader)).to(self.device)
+        # The scope has to cover AtomicData.from_config too, not just the
+        # config: that is where the tensors are built, and it reads the
+        # process-wide default dtype for every one of them.
+        with torch_tools.default_dtype(self.default_dtype):
+            config = mace_data.config_from_atoms(
+                atoms, key_specification=keyspec, head_name=self.head
+            )
+            data_loader = torch_geometric.dataloader.DataLoader(
+                dataset=[
+                    mace_data.AtomicData.from_config(
+                        config,
+                        z_table=self.z_table,
+                        cutoff=self.r_max,
+                        heads=self.available_heads,
+                    )
+                ],
+                batch_size=1,
+                shuffle=False,
+                drop_last=False,
+            )
+            batch = next(iter(data_loader)).to(self.device)
         return batch
 
     def _clone_batch(self, batch):
@@ -1211,19 +1366,26 @@ class MagneticMACECalculator(Calculator):
         ret_tensors = self._create_result_tensors(
             self.model_type, self.num_models, len(atoms)
         )
+        stress_available = False
         for i, model in enumerate(self.models):
             batch = self._clone_batch(batch_base)
-            out = model(
-                batch.to_dict(),
-                compute_stress=compute_stress,
-                training=self.use_compile,
-            )
+            # Scoped for the same reason as MACECalculator: extensions build
+            # tensors mid-forward without an explicit dtype, and would follow
+            # the process-wide default instead of the model's.
+            with torch_tools.default_dtype(self.default_dtype):
+                out = model(
+                    batch.to_dict(),
+                    compute_stress=compute_stress,
+                    training=self.use_compile,
+                )
             if self.model_type in ["MACE", "EnergyDipoleMACE"]:
                 ret_tensors["energies"][i] = out["energy"].detach()
                 ret_tensors["node_energy"][i] = (out["node_energy"] - node_e0).detach()
                 ret_tensors["forces"][i] = out["forces"].detach()
                 if out["stress"] is not None:
                     ret_tensors["stress"][i] = out["stress"].detach()
+                if i == 0:
+                    stress_available = out["stress"] is not None
             if self.model_type in ["DipoleMACE", "EnergyDipoleMACE"]:
                 ret_tensors["dipole"][i] = out["dipole"].detach()
             if "equilibrated_magmom" in out.keys():
@@ -1265,7 +1427,11 @@ class MagneticMACECalculator(Calculator):
                     * self.energy_units_to_eV
                     / self.length_units_to_A
                 )
-            if out["stress"] is not None:
+            # The first member decides, as in MACECalculator, where
+            # _create_result_tensors only allocates a key when the first
+            # model's output has it. Reading `out` here instead took the last
+            # member, since it outlives the loop.
+            if stress_available:
                 self.results["stress"] = full_3x3_to_voigt_6_stress(
                     torch.mean(ret_tensors["stress"], dim=0).cpu().numpy()
                     * self.energy_units_to_eV
@@ -1299,16 +1465,31 @@ class MagneticMACECalculator(Calculator):
             atoms = self.atoms
         if self.model_type != "MACE":
             raise NotImplementedError("Only implemented for MACE models")
+        # Refuse rather than fall through to magmom_mace. The wrapper's forward
+        # takes no compute_hessian, but the inner model's hessian is also a
+        # different quantity: it holds the moments fixed, so it drops the term
+        # coming from their relaxation, dm*/dr. Returning that under the name
+        # "hessian" would be silently wrong instead of loudly unsupported.
+        if any(hasattr(model, "magmom_mace") for model in self.models):
+            raise NotImplementedError(
+                "Hessians are not available for SCF-wrapped magnetic models "
+                "(MagneticSCFMACE). Its forward does not accept compute_hessian, "
+                "and the inner model's hessian holds the magnetic moments fixed, "
+                "so it is not the hessian of the self-consistent energy. Call the "
+                "inner magmom_mace directly if the fixed-moment hessian is what "
+                "you want."
+            )
         batch = self._atoms_to_batch(atoms)
-        hessians = [
-            model(
-                self._clone_batch(batch).to_dict(),
-                compute_hessian=True,
-                compute_stress=False,
-                training=self.use_compile,
-            )["hessian"]
-            for model in self.models
-        ]
+        with torch_tools.default_dtype(self.default_dtype):
+            hessians = [
+                model(
+                    self._clone_batch(batch).to_dict(),
+                    compute_hessian=True,
+                    compute_stress=False,
+                    training=self.use_compile,
+                )["hessian"]
+                for model in self.models
+            ]
         hessians = [hessian.detach().cpu().numpy() for hessian in hessians]
         if self.num_models == 1:
             return hessians[0]
@@ -1333,7 +1514,10 @@ class MagneticMACECalculator(Calculator):
         if num_layers == -1:
             num_layers = num_interactions
         batch = self._atoms_to_batch(atoms)
-        descriptors = [model(batch.to_dict())["node_feats"] for model in self.models]
+        with torch_tools.default_dtype(self.default_dtype):
+            descriptors = [
+                model(batch.to_dict())["node_feats"] for model in self.models
+            ]
 
         irreps_out = o3.Irreps(
             str(

@@ -38,6 +38,19 @@ def _normalize_github_download_url(url: str) -> str:
     return normalized
 
 
+def _discard_cached_download(path):
+    """Remove a just-downloaded file that turned out not to be a checkpoint.
+
+    Only ever called for a path the caller has just created, since every call
+    site is guarded by `if not os.path.isfile(path)`, so this cannot delete a
+    model the user already had.
+    """
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _urlretrieve_with_timeout(url, filename, timeout=_DOWNLOAD_TIMEOUT):
     """Download *url* to *filename* with a per-read socket timeout.
 
@@ -176,6 +189,12 @@ def download_mace_mp_checkpoint(model: Optional[Union[str, Path]] = None) -> str
         print(f"Downloading MACE model from {checkpoint_url!r}")
         _, http_msg = _urlretrieve_with_timeout(checkpoint_url, cached_model_path)
         if "Content-Type: text/html" in str(http_msg):
+            # The fetch succeeded at the HTTP layer, so the helper already
+            # renamed the body into place: an error page is now sitting where
+            # the checkpoint belongs. Leaving it there poisons the cache, since
+            # the isfile check above skips the download from then on and
+            # torch.load reports a zip-archive error instead of this one.
+            _discard_cached_download(cached_model_path)
             raise RuntimeError(
                 f"Model download failed, please check the URL {checkpoint_url}"
             )
@@ -218,6 +237,12 @@ def download_mace_polar_checkpoint(model: Union[str, Path]) -> str:
         print(f"Downloading MACE-Polar model from {checkpoint_url!r}")
         _, http_msg = _urlretrieve_with_timeout(checkpoint_url, cached_model_path)
         if "Content-Type: text/html" in str(http_msg):
+            # The fetch succeeded at the HTTP layer, so the helper already
+            # renamed the body into place: an error page is now sitting where
+            # the checkpoint belongs. Leaving it there poisons the cache, since
+            # the isfile check above skips the download from then on and
+            # torch.load reports a zip-archive error instead of this one.
+            _discard_cached_download(cached_model_path)
             raise RuntimeError(
                 f"Model download failed, please check the URL {checkpoint_url}"
             )
@@ -241,9 +266,10 @@ def mace_mp(
     device: str = "",
     default_dtype: str = "float32",
     dispersion: bool = False,
-    damping: str = "bj",  # choices: ["zero", "bj", "zerom", "bjm"]
+    dispersion_damping: str = "bj",  # choices: ["zero", "bj", "zerom", "bjm"]
     dispersion_xc: str = "pbe",
     dispersion_cutoff: float = 40.0 * units.Bohr,
+    dispersion_coord_cutoff: float = 40.0 * units.Bohr,
     return_raw_model: bool = False,
     **kwargs,
 ) -> Union[MACECalculator, torch.nn.Module, SumCalculator]:
@@ -267,15 +293,25 @@ def mace_mp(
         device (str, optional): Device to use for the model. Defaults to "cuda" if available.
         default_dtype (str, optional): Default dtype for the model. Defaults to "float32".
         dispersion (bool, optional): Whether to use D3 dispersion corrections. Defaults to False.
-        damping (str): The damping function associated with the D3 correction. Defaults to "bj" for D3(BJ).
-        dispersion_xc (str, optional): Exchange-correlation functional for D3 dispersion corrections.
-        dispersion_cutoff (float, optional): Cutoff radius in Bohr for D3 dispersion corrections.
+        dispersion_damping (str): The damping function associated with the D3 correction. Defaults to "bj" for D3(BJ).
+            Also accepted under its former name, "damping".
+        dispersion_xc (str, optional): Exchange-correlation functional for D3 dispersion corrections. Defaults to "pbe"
+        dispersion_cutoff (float, optional): Cutoff radius in D3 dispersion corrections. Defaults to 40 * Bohr
+        dispersion_coord_cutoff (float, optional): Cutoff radius for coordination number in D3 dispersion corrections. Defaults to 40 * Bohr
         return_raw_model (bool, optional): Whether to return the raw model or an ASE calculator. Defaults to False.
         **kwargs: Passed to MACECalculator and TorchDFTD3Calculator.
 
     Returns:
         MACECalculator: trained on the MPtrj dataset (unless model otherwise specified).
     """
+    # "damping" is the released name this argument had before it became
+    # dispersion_damping. It still arrives through **kwargs, which are also
+    # forwarded to TorchDFTD3Calculator, so without this it would collide
+    # with the explicit damping= there and raise a multiple-values TypeError.
+    damping_alias = kwargs.pop("damping", None)
+    if damping_alias is not None:
+        dispersion_damping = damping_alias
+
     try:
         if model in mace_mp_names or str(model).startswith("https:"):
             model_path = download_mace_mp_checkpoint(model)
@@ -318,10 +354,11 @@ def mace_mp(
     dtype = torch.float32 if default_dtype == "float32" else torch.float64
     d3_calc = TorchDFTD3Calculator(
         device=device,
-        damping=damping,
+        damping=dispersion_damping,
         dtype=dtype,
         xc=dispersion_xc,
         cutoff=dispersion_cutoff,
+        cnthr=dispersion_coord_cutoff,
         **kwargs,
     )
 
@@ -638,6 +675,9 @@ def mace_mdp(
                     checkpoint_url, cached_model_path
                 )
                 if "Content-Type: text/html" in str(http_msg):
+                    # See download_mace_mp_checkpoint: the body is already at
+                    # the cache path, and leaving it there poisons the cache.
+                    _discard_cached_download(cached_model_path)
                     raise RuntimeError(
                         f"Model download failed, please check the URL {checkpoint_url}"
                     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -20,6 +21,7 @@ from mace.calculators.foundations_models import mace_polar
 from mace.modules import interaction_classes
 from mace.modules.extensions import PolarMACE
 from mace.tools import torch_geometric, utils
+from mace.tools.scripts_utils import get_optimizer, get_params_options
 
 # pylint: disable=redefined-outer-name
 
@@ -445,6 +447,167 @@ def test_energy_invariance_under_rotation_and_translation(dtype):
 
 
 # ---------------------------------------------------------------------------
+# CPU/CUDA parity of the electrostatics path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda is not available")
+@pytest.mark.parametrize("dtype", [torch.float64])
+def test_polar_cpu_cuda_parity(dtype):
+    """The same model is moved to CUDA rather than rebuilt, so the weights are
+    identical by construction and any difference is the device's. float64 keeps
+    the tolerance from depending on thread count and hardware.
+    """
+    torch.manual_seed(0)
+    model = _build_minimal_model(torch.device("cpu"), dtype)
+    batch_cpu = _build_minimal_batch(torch.device("cpu"), dtype)
+
+    out_cpu = model(batch_cpu, training=False, compute_force=False)
+    E_cpu = out_cpu["energy"].detach()
+
+    # _build_minimal_batch is deterministic (no RNG), so this is the same input.
+    model.to(device="cuda")
+    batch_cuda = _build_minimal_batch(torch.device("cuda"), dtype)
+
+    out_cuda = model(batch_cuda, training=False, compute_force=False)
+    E_cuda = out_cuda["energy"].detach()
+
+    assert torch.isfinite(E_cuda).all()
+    assert E_cuda.shape == E_cpu.shape
+    assert torch.allclose(E_cpu, E_cuda.cpu(), atol=1e-8, rtol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Partial-PBC (slab) regression: get_neighborhood cell fix vs electrostatics
+# ---------------------------------------------------------------------------
+
+
+def _polar_slab_atoms(vacuum: float) -> Atoms:
+    """
+    z-mirror-symmetric OH2 slab, periodic in x and y with vacuum along z
+    (pbc = (T, T, F)).
+
+    The two H are stacked at +/- z with identical xy, so the slab is invariant
+    under z -> -z and carries no net dipole perpendicular to the surface. That
+    matters for the electrostatics check below: a 3D-periodic k-space (Ewald)
+    sum applied to a slab converges quickly with the vacuum gap only when there
+    is no perpendicular dipole (otherwise it has a conditionally convergent
+    term that needs a slab / Yeh-Berkowitz correction).
+    """
+    a = 3.2
+    symbols = ["O", "H", "H"]
+    positions = [[0.0, 0.0, 0.0], [0.8, 0.8, 0.6], [0.8, 0.8, -0.6]]
+    cell = [[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, vacuum]]
+    return Atoms(symbols=symbols, positions=positions, cell=cell, pbc=(True, True, False))
+
+
+def _run_polar_slab(model, dtype, vacuum: float) -> dict:
+    """Build a slab config through get_neighborhood -> AtomicData and run PolarMACE."""
+    z_table = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
+    config = data.config_from_atoms(_polar_slab_atoms(vacuum), head_name="Default")
+    atomic_data = data.AtomicData.from_config(
+        config, z_table=z_table, cutoff=float(model.r_max), heads=model.heads
+    )
+    loader = torch_geometric.dataloader.DataLoader(
+        dataset=[atomic_data], batch_size=1, shuffle=False, drop_last=False
+    )
+    batch = next(iter(loader)).to("cpu").to_dict()
+    for key, value in batch.items():
+        if torch.is_tensor(value) and value.dtype.is_floating_point:
+            batch[key] = value.to(dtype)
+    out = model(batch, training=False, compute_force=True, compute_stress=True)
+    return {
+        "energy": out["energy"].detach(),
+        "forces": out["forces"].detach(),
+        "stress": None if out.get("stress") is None else out["stress"].detach(),
+        "cell": batch["cell"].view(3, 3).detach().cpu().numpy(),
+        "volume": float(batch["volume"].reshape(-1)[0]),
+        "rcell": batch["rcell"].view(3, 3).detach().cpu().numpy(),
+        "edges": batch["edge_index"].detach().cpu().numpy(),
+    }
+
+
+@pytest.mark.parametrize("dtype", [torch.float64])
+def test_polar_slab_partial_pbc_cell_contract(dtype):
+    """
+    get_neighborhood must return the *physical* cell for a partially periodic
+    (slab) system, and that cell must feed AtomicData.volume / rcell (which drive
+    PolarMACE's k-space electrostatics). Deterministic contract for the combined
+    fix: extent-based padding for the neighbour search, physical cell returned
+    on partial PBC.
+    """
+    device = torch.device("cpu")
+    torch.manual_seed(0)
+    model = _build_minimal_model(device, dtype)
+
+    thin = _run_polar_slab(model, dtype, vacuum=18.0)
+    thick = _run_polar_slab(model, dtype, vacuum=42.0)
+
+    # physical cell returned, not the matscipy blow-up nor max(|pos|)*5*cutoff.
+    assert np.isclose(thin["cell"][2, 2], 18.0), thin["cell"]
+    assert np.isclose(thick["cell"][2, 2], 42.0), thick["cell"]
+    # the periodic x/y rows are the true lattice, identical across vacuum sizes.
+    assert np.allclose(thin["cell"][:2, :2], thick["cell"][:2, :2])
+    # volume / rcell derive from the physical cell -> they feed the k-space sum.
+    assert np.isclose(thin["volume"], np.linalg.det(thin["cell"]))
+    assert np.isclose(thick["volume"], np.linalg.det(thick["cell"]))
+    assert np.allclose(thin["rcell"], 2 * np.pi * np.linalg.inv(thin["cell"].T))
+
+    # short-range graph is invariant to the vacuum: the padding only ever lived
+    # in the internal extended cell used for neighbour binning, never in shifts.
+    assert thin["edges"].shape == thick["edges"].shape
+    assert np.array_equal(thin["edges"], thick["edges"])
+
+    # forward is finite on a partial-PBC electrostatic model (a path that the
+    # aperiodic-only and non-electrostatic fixes each left untested).
+    for res in (thin, thick):
+        assert torch.isfinite(res["energy"]).all()
+        assert torch.isfinite(res["forces"]).all()
+        assert res["stress"] is not None and torch.isfinite(res["stress"]).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float64])
+def test_polar_slab_electrostatics_converge_with_vacuum(dtype):
+    """
+    Smoke check for the coupling flagged in review ("the vacuum affects the
+    electrostatic part"): the returned physical cell becomes the k-space box
+    (and its det() the volume), so the vacuum gap enters the electrostatics.
+    The short-range part is identical across vacuum sizes (same edges/shifts),
+    so any energy change is purely the electrostatic response to the cell, and
+    on a benign slab it must *converge* (not diverge) as the vacuum grows.
+
+    SCOPE: this guards "finite and non-diverging", not the Yeh-Berkowitz slab
+    correction itself. _polar_slab_atoms is dipole-free, and a dipole-free slab
+    converges whether or not that correction is active (verified by toggling
+    include_pbc_corrections), so this test does NOT exercise it. Testing the
+    correction would need a dipolar slab, which is not stable on an untrained
+    model here.
+    """
+    device = torch.device("cpu")
+    torch.manual_seed(0)
+    model = _build_minimal_model(device, dtype)
+
+    energies = {
+        vac: _run_polar_slab(model, dtype, vacuum=vac)["energy"].item()
+        for vac in (30.0, 45.0, 60.0)
+    }
+    for vac, e in energies.items():
+        assert np.isfinite(e), (vac, e)
+
+    d1 = abs(energies[45.0] - energies[30.0])
+    d2 = abs(energies[60.0] - energies[45.0])
+    # Converging: the far-field increment is no larger than the near one. Guard
+    # the case where it is already converged at 30 A (both increments ~ noise).
+    tol = 1e-9 + 1e-6 * abs(energies[60.0])
+    assert d2 <= d1 + tol, (
+        "slab electrostatics is not converging with vacuum "
+        f"(d(30->45)={d1!r}, d(45->60)={d2!r}); with the Yeh-Berkowitz slab "
+        "correction active a dipole-free slab must converge"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint evaluation
 # ---------------------------------------------------------------------------
 
@@ -516,6 +679,26 @@ POLAR_COMPONENTS = {
 POLAR_CHECKPOINT_ATOL = {"float32": 5e-4, "float64": 5e-8}
 POLAR_COMPONENT_ATOL = {"float32": 5e-4, "float64": 1e-8}
 
+# The totals compared here are ~2.1e3, where one float32 ulp is 2.4e-4: the
+# absolute tolerances above are TWO ulps for those, which a float32 reduction
+# cannot be expected to survive, since thread count and BLAS kernel both
+# reorder it. The float64 legs agree to 2e-11 relative everywhere this has run
+# (macOS arm64, Linux x86_64, GitHub runners), so the code path is identical
+# and only float32 rounding differs. Add a relative term for the large
+# magnitudes; the absolute floors above still govern the small components, so
+# no comparison in this file gets tighter than it was.
+POLAR_CHECKPOINT_RTOL = {"float32": 1e-5, "float64": 0.0}
+POLAR_COMPONENT_RTOL = {"float32": 1e-5, "float64": 0.0}
+
+
+def _assert_energy_close(actual, expected, atol, rtol, label):
+    tolerance = atol + rtol * abs(expected)
+    delta = abs(actual - expected)
+    assert delta <= tolerance, (
+        f"{label}: got {actual!r}, expected {expected!r} "
+        f"(delta {delta:.3e} > tolerance {tolerance:.3e})"
+    )
+
 
 @pytest.mark.network
 @pytest.mark.parametrize("model_name, expected_energy", POLAR_MODELS)
@@ -533,7 +716,13 @@ def test_polar_checkpoint_evaluates(model_name, expected_energy):
 
     energy = atoms.get_potential_energy()
     assert np.isfinite(energy)
-    assert abs(float(energy) - expected_energy) < POLAR_CHECKPOINT_ATOL["float32"]
+    _assert_energy_close(
+        float(energy),
+        expected_energy,
+        POLAR_CHECKPOINT_ATOL["float32"],
+        POLAR_CHECKPOINT_RTOL["float32"],
+        f"{model_name} float32 checkpoint energy",
+    )
 
 
 @pytest.mark.network
@@ -552,7 +741,13 @@ def test_polar_checkpoint_evaluates_float64(model_name, expected_energy):
 
     energy = atoms.get_potential_energy()
     assert np.isfinite(energy)
-    assert abs(float(energy) - expected_energy) < POLAR_CHECKPOINT_ATOL["float64"]
+    _assert_energy_close(
+        float(energy),
+        expected_energy,
+        POLAR_CHECKPOINT_ATOL["float64"],
+        POLAR_CHECKPOINT_RTOL["float64"],
+        f"{model_name} float64 checkpoint energy",
+    )
 
 
 @pytest.mark.network
@@ -592,10 +787,17 @@ def test_polar_checkpoint_energy_components(dtype_name, dtype, model_name, _):
     }
     expected = POLAR_COMPONENTS[dtype_name][model_name]
     atol = POLAR_COMPONENT_ATOL[dtype_name]
+    rtol = POLAR_COMPONENT_RTOL[dtype_name]
 
     for key, expected_value in expected.items():
         assert np.isfinite(values[key])
-        assert abs(values[key] - expected_value) < atol
+        _assert_energy_close(
+            values[key],
+            expected_value,
+            atol,
+            rtol,
+            f"{model_name} {dtype_name} {key}",
+        )
 
 
 def test_polar_calculator_returns_fukui_functions_by_default():
@@ -1039,7 +1241,13 @@ else:
     BENCH_ROOT = Path("")
 
 ATOL_BY_DTYPE = {
-    "float32": 5e-6,
+    # float32 sums in an order that depends on thread count and on which BLAS
+    # kernel is picked, so these references cannot be reproduced bit for bit
+    # across machines. At 5e-6 the X23 set failed on single force components
+    # by a few percent over the bound, on the same commit that passed in a
+    # sibling CI run. 5e-5 keeps about an order of magnitude of headroom and
+    # still catches a real regression, which moves these by far more.
+    "float32": 5e-5,
     "float64": 1e-9,
 }
 
@@ -1089,3 +1297,27 @@ def test_polar_2l_regression_hardcoded_values(polar_calc_regression, structure_r
     np.testing.assert_allclose(
         stress, np.array(expected["stress"]), rtol=0.0, atol=atol
     )
+
+
+def _optimizer_args() -> argparse.Namespace:
+    """Optimizer-related arguments with the run_train defaults."""
+    return argparse.Namespace(
+        lr=0.01,
+        weight_decay=5e-7,
+        amsgrad=True,
+        beta=0.9,
+        freeze=None,
+        optimizer="adam",
+        lr_params_factors=json.dumps({}),
+        train_one_body_contribution=True,
+    )
+
+
+def test_polar_mace_registers_all_trainable_parameters():
+    """PolarMACE's optional submodules (lr_source_maps, fukui_source_map,
+    field_dependent_charges_maps, ...) motivated the explicit registration. Every
+    trainable parameter must be claimed by an optimizer group; get_params_options
+    raises otherwise, so a successful optimizer build is the assertion."""
+    model = _build_minimal_model(torch.device("cpu"), torch.get_default_dtype())
+    args = _optimizer_args()
+    get_optimizer(args, get_params_options(args, model))

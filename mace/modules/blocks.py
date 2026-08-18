@@ -4,9 +4,11 @@
 # Authors: Ilyes Batatia, Gregor Simm
 # This program is distributed under the MIT License (see MIT.md)
 ###########################################################################################
+# pylint: disable=too-many-lines
 
+import itertools
 from abc import abstractmethod
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch.nn.functional
@@ -635,6 +637,8 @@ class EquivariantProductBasisWithSelfMagmomBlock(torch.nn.Module):
 
 @compile_mode("script")
 class InteractionBlock(torch.nn.Module):
+    avg_num_neighbors: torch.Tensor
+
     def __init__(
         self,
         node_attrs_irreps: o3.Irreps,
@@ -656,7 +660,10 @@ class InteractionBlock(torch.nn.Module):
         self.edge_feats_irreps = edge_feats_irreps
         self.target_irreps = target_irreps
         self.hidden_irreps = hidden_irreps
-        self.avg_num_neighbors = avg_num_neighbors
+        self.register_buffer(
+            "avg_num_neighbors",
+            torch.as_tensor(avg_num_neighbors, dtype=torch.get_default_dtype()),
+        )
         if radial_MLP is None:
             radial_MLP = [64, 64, 64]
         if edge_irreps is None:
@@ -670,6 +677,107 @@ class InteractionBlock(torch.nn.Module):
         if self.cueq_config and self.cueq_config.conv_fusion:
             self.conv_fusion = self.cueq_config.conv_fusion
         self._setup()
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        super().__setstate__(state)
+        self._adopt_unpickled_avg_num_neighbors()
+
+    def _adopt_unpickled_avg_num_neighbors(self) -> None:
+        """Make a pickled float into the buffer this attribute now is.
+
+        `avg_num_neighbors` became a registered buffer with a declared
+        `torch.Tensor` type, and `_load_from_state_dict` covers checkpoints
+        loaded *as state dicts*. It does not cover the other way MACE ships a
+        model: `torch.load` of a whole pickled module, which is what the ASE
+        calculator, every `mace/cli` tool and the pretrained artifacts under
+        `mace/calculators/foundations_models/` all use. Unpickling restores
+        `__dict__` directly, so neither `__init__` nor `_load_from_state_dict`
+        runs, and the instance keeps the plain Python float it was pickled
+        with. Eager forward passes are indifferent -- a float promotes against
+        whatever it divides -- so this surfaces only under TorchScript, where
+        the declared type is checked:
+
+            Could not cast attribute 'avg_num_neighbors' to type Tensor
+
+        which made `mace_create_lammps_model` fail on every checkpoint written
+        before the buffer landed.
+
+        Both the dtype and the device come from the module's own weights, so
+        the promoted buffer lands beside them.
+
+        The dtype matters because it preserves the arithmetic. As a Python
+        float the value participated at the precision of whatever it was
+        divided into, so taking `torch.get_default_dtype()` instead would
+        silently round the normalization of a float64 model loaded under a
+        float32 default -- a numerical change on load, in a value that scales
+        every message.
+
+        The device matters because a float has none. `torch.load(...,
+        map_location="cuda")` puts the weights on the accelerator, and a
+        promoted buffer built without a device would stay on the CPU, leaving
+        the module's tensors split across two devices for any caller that does
+        not go on to `.to()` -- the raw-model foundation loaders, and anything
+        that hands a freshly loaded model straight to DDP. `avg_num_neighbors`
+        is zero-dim, so the division itself would survive under torch's
+        cpu-scalar rule; what does not survive is everything that assumes a
+        module's tensors are colocated. `set_avg_num_neighbors` above already
+        carries both, and this is the same rule.
+        """
+        legacy = self.__dict__.pop("avg_num_neighbors", None)
+        if legacy is None:
+            return  # already a buffer: pickled after it became one
+        dtype, device = self._weight_dtype_and_device()
+        self.register_buffer(
+            "avg_num_neighbors", torch.as_tensor(legacy, dtype=dtype, device=device)
+        )
+
+    def _weight_dtype_and_device(self) -> Tuple[torch.dtype, torch.device]:
+        """Where this block's weights are, or the process defaults.
+
+        The weights live in submodules, and they are in place by the time
+        `__setstate__` runs -- pickle builds the whole state mapping, child
+        modules included, before handing it over. The fallback is for a block
+        that genuinely has no floating tensor yet.
+        """
+        for tensor in itertools.chain(self.parameters(), self.buffers()):
+            if tensor.is_floating_point():
+                return tensor.dtype, tensor.device
+        return torch.get_default_dtype(), torch.device("cpu")
+
+    def set_avg_num_neighbors(self, value: Union[float, torch.Tensor]) -> None:
+        """Copy neighbor normalization from current or legacy models."""
+        self.avg_num_neighbors.copy_(
+            torch.as_tensor(
+                value,
+                dtype=self.avg_num_neighbors.dtype,
+                device=self.avg_num_neighbors.device,
+            )
+        )
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        key = prefix + "avg_num_neighbors"
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+        # Checkpoints created before this value became a buffer rely on the
+        # normalization supplied when reconstructing the model.
+        if key not in state_dict and key in missing_keys:
+            missing_keys.remove(key)
 
     @abstractmethod
     def _setup(self) -> None:
@@ -1860,3 +1968,201 @@ class ScaleShiftBlock(torch.nn.Module):
             else f"{self.shift.item():.4f}"
         )
         return f"{self.__class__.__name__}(scale={formatted_scale}, shift={formatted_shift})"
+
+
+# LES-specific readout blocks
+class LinearLesReadoutBlock(torch.nn.Module):
+    """Predicts a 3x3 polarizability tensor from equivariant features.
+
+    Combines scalar weights with vector features via outer products.
+    Supports 1o (odd) and 1e (even) vector channels independently.
+    """
+
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        make_w_pos: bool = True,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+    ):
+        super().__init__()
+        self.irreps_in = o3.Irreps(irreps_in)
+        self.make_w_pos = make_w_pos
+        # cueq uses ir_mul layout, which interleaves vector components differently.
+        self.ir_mul = get_layout(cueq_config) == "ir_mul"
+
+        self.linear = Linear(
+            irreps_in=self.irreps_in,
+            irreps_out=self.irreps_in,
+            cueq_config=cueq_config,
+        )
+
+        self.scalar_slices: List[Tuple[int, int]] = []
+        self.vector_1o_slices: List[Tuple[int, int]] = []
+        self.vector_1e_slices: List[Tuple[int, int]] = []
+
+        n_scalar = 0
+        n_1o = 0
+        n_1e = 0
+        offset = 0
+
+        for mul, ir in self.irreps_in:
+            block_dim = mul * ir.dim
+
+            if ir.l == 0 and ir.p == 1:  # 0e
+                self.scalar_slices.append((offset, offset + block_dim))
+                n_scalar += mul
+            elif ir.l == 1 and ir.p == -1:  # 1o
+                self.vector_1o_slices.append((offset, offset + block_dim))
+                n_1o += mul
+            elif ir.l == 1 and ir.p == 1:  # 1e
+                self.vector_1e_slices.append((offset, offset + block_dim))
+                n_1e += mul
+
+            offset += block_dim
+
+        if n_scalar == 0:
+            raise ValueError("Need at least one 0e block for weights.")
+        if n_1o + n_1e == 0:
+            raise ValueError("Need at least one 1o or 1e block.")
+
+        self.n_scalar = n_scalar
+        self.n_1o = n_1o
+        self.n_1e = n_1e
+
+        self.scalar_to_weight_1o = (
+            torch.nn.Linear(n_scalar, n_1o, bias=True) if n_1o > 0 else None
+        )
+        self.scalar_to_weight_1e = (
+            torch.nn.Linear(n_scalar, n_1e, bias=True) if n_1e > 0 else None
+        )
+
+    def _collect_scalars(self, y: torch.Tensor) -> torch.Tensor:
+        return torch.cat([y[:, s:e] for s, e in self.scalar_slices], dim=-1)
+
+    def _collect_vectors(
+        self, y: torch.Tensor, slices: List[Tuple[int, int]]
+    ) -> torch.Tensor:
+        vecs: List[torch.Tensor] = []
+        for s, e in slices:
+            block = y[:, s:e]
+            if self.ir_mul:
+                vecs.append(block.reshape(y.shape[0], 3, -1).transpose(1, 2))
+            else:
+                vecs.append(block.reshape(y.shape[0], -1, 3))
+        return torch.cat(vecs, dim=1)
+
+    def _dyadic_sum(self, w: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        return (w[:, :, None, None] * v[:, :, None, :] * v[:, :, :, None]).sum(dim=1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        heads: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+    ) -> torch.Tensor:
+        if not hasattr(self, "ir_mul"):  # checkpoints saved before the cueq-layout fix
+            self.ir_mul = False
+        y = self.linear(x)
+        s = self._collect_scalars(y)
+        a = y.new_zeros((y.shape[0], 3, 3))
+
+        if self.n_1o > 0 and self.scalar_to_weight_1o is not None:
+            v_1o = self._collect_vectors(y, self.vector_1o_slices)
+            w_1o = self.scalar_to_weight_1o(s)
+            if self.make_w_pos:
+                w_1o = w_1o**2
+            a = a + self._dyadic_sum(w_1o, v_1o)
+
+        if self.n_1e > 0 and self.scalar_to_weight_1e is not None:
+            v_1e = self._collect_vectors(y, self.vector_1e_slices)
+            w_1e = self.scalar_to_weight_1e(s)
+            a = a + self._dyadic_sum(w_1e, v_1e)
+
+        return a
+
+
+@compile_mode("script")
+class NonLinearLesReadoutBlock(torch.nn.Module):
+    """Nonlinear version of LinearLesReadoutBlock using an MLP for channel mixing."""
+
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        hidden_dim: int = 32,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+    ):
+        super().__init__()
+        self.irreps_in = o3.Irreps(irreps_in)
+        # cueq uses ir_mul layout, which interleaves vector components differently.
+        self.ir_mul = get_layout(cueq_config) == "ir_mul"
+
+        self.linear = Linear(
+            irreps_in=self.irreps_in,
+            irreps_out=self.irreps_in,
+            cueq_config=cueq_config,
+        )
+
+        self._build_slices()
+
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(self.n_scalar, hidden_dim),
+            torch.nn.SiLU(),
+            torch.nn.Linear(hidden_dim, self.n_1o * self.n_1o),
+        )
+
+    def _build_slices(self) -> None:
+        # Record 0e/1o block boundaries instead of assuming uniform multiplicity
+        # and [0e, 1o, ...] ordering.
+        self.scalar_slices: List[Tuple[int, int]] = []
+        self.vector_1o_slices: List[Tuple[int, int]] = []
+        n_scalar = 0
+        n_1o = 0
+        offset = 0
+        for mul, ir in self.irreps_in:
+            block_dim = mul * ir.dim
+            if ir.l == 0 and ir.p == 1:  # 0e
+                self.scalar_slices.append((offset, offset + block_dim))
+                n_scalar += mul
+            elif ir.l == 1 and ir.p == -1:  # 1o
+                self.vector_1o_slices.append((offset, offset + block_dim))
+                n_1o += mul
+            offset += block_dim
+
+        if n_scalar == 0:
+            raise ValueError("Need at least one 0e block for weights.")
+        if n_1o == 0:
+            raise ValueError("Need at least one 1o block.")
+
+        self.n_scalar = n_scalar
+        self.n_1o = n_1o
+
+    def _collect_scalars(self, y: torch.Tensor) -> torch.Tensor:
+        return torch.cat([y[:, s:e] for s, e in self.scalar_slices], dim=-1)
+
+    def _collect_vectors(self, y: torch.Tensor) -> torch.Tensor:
+        vecs: List[torch.Tensor] = []
+        for s, e in self.vector_1o_slices:
+            block = y[:, s:e]
+            if self.ir_mul:
+                vecs.append(block.reshape(y.shape[0], 3, -1).transpose(1, 2))
+            else:
+                vecs.append(block.reshape(y.shape[0], -1, 3))
+        return torch.cat(vecs, dim=1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        heads: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+    ) -> torch.Tensor:
+        # checkpoints saved before the cueq-layout fix used a single `cdim`
+        if not hasattr(self, "n_1o"):
+            self.ir_mul = False
+            self.irreps_in = o3.Irreps(self.irreps_in)
+            self._build_slices()
+        y = self.linear(x)
+        s = self._collect_scalars(y)
+        v = self._collect_vectors(y)
+        M = self.mlp(s).reshape(y.shape[0], self.n_1o, self.n_1o)
+        M = 0.5 * (M + M.transpose(-1, -2))
+        tmp = torch.einsum("ncd,ndj->ncj", M, v)
+        a = torch.einsum("nci,ncj->nij", tmp, v)
+        return 0.5 * (a + a.transpose(-1, -2))

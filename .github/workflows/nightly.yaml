@@ -3,7 +3,7 @@ name: nightly
 # foundation-model tests (downloads), the full-matrix e2e training suite,
 # external-dep refresh (polar/les install from git and can break on their
 # own), CPU benchmarks, the real-tier LAMMPS integration, and the durations
-# refresh. GPU nightly coverage runs via ci-gpu.yaml's own schedule.
+# refresh. GPU nightly coverage runs via ci-gpu-mpcdf.yaml's own schedule.
 
 on:
   schedule:
@@ -110,12 +110,10 @@ jobs:
           if-no-files-found: ignore
 
   lammps-real:
-    # Real-tier LAMMPS via conda-forge (ML-IAP unified path). Deliberately
-    # continue-on-error while it proves itself; promote to blocking after a
-    # stable green streak.
+    # Real-tier LAMMPS via conda-forge (ML-IAP unified path). Runs a
+    # single-layer model; tests/integrations/README.md says why.
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    continue-on-error: true
     defaults:
       run:
         shell: bash -leo pipefail {0}
@@ -133,6 +131,16 @@ jobs:
           python -m pip install -U pip
           python -m pip install ".[dev, cueq]"
           python -c "import lammps; print('lammps import OK')"
+      # The conda env activates only in a login shell, and this job's
+      # `defaults.run.shell` does NOT reach steps inside a composite action --
+      # run-tests hardcodes `shell: bash`, so pytest was simply not found
+      # (exit 127) and the real tier never ran a single test. Putting the env's
+      # bin on PATH is what makes it visible to the action.
+      - name: Expose the conda env to non-login shells
+        run: |
+          test -n "$CONDA_PREFIX" || { echo "conda env is not active"; exit 1; }
+          test -x "$CONDA_PREFIX/bin/pytest" || { echo "no pytest in $CONDA_PREFIX"; exit 1; }
+          echo "$CONDA_PREFIX/bin" >> "$GITHUB_PATH"
       - uses: ./.github/actions/run-tests
         with:
           tests: tests/integrations
@@ -145,8 +153,24 @@ jobs:
     # THE project coverage number: full fixed CPU scope (network, cueq, polar,
     # les, torchsim, schedulefree), comparable night to night. The per-PR
     # coverage job measures only the deterministic PR slice by design.
+    #
+    # Sharded, one xdist worker per shard, because this is the ONLY job that
+    # installs every extra at once: extensions-refresh runs polar, les,
+    # torchsim and backends-cpu in separate jobs, and durations-refresh runs
+    # the same paths with `dev` alone, so they all skip the heavy ones. On
+    # 2026-08-06 the single job died at 87% with the runner itself killed
+    # ("the runner has received a shutdown signal") while one worker was in a
+    # cueq CPU-fallback polar case and the other was loading the omol
+    # foundation model. Shards bound both the concurrent peak and how much a
+    # single process accumulates; `[METRICS] mem/peak rss` in the log says
+    # which of the two it was, should it come back.
+    name: coverage-full (group ${{ matrix.split-group }})
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        split-group: [ 1, 2, 3 ]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/setup-mace
@@ -170,10 +194,48 @@ jobs:
           markers: not gpu and not benchmark
           require-caps: network,cueq,polar,les,torchsim,schedulefree
           allow-network: "true"
-          coverage: "true"
+          coverage: "data"
+          splits: "3"
+          group: ${{ matrix.split-group }}
+          numprocs: "1"
           timeout: "1200"
+      - name: Name this shard's coverage data
+        run: mv .coverage ".coverage.${{ matrix.split-group }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-data-${{ matrix.split-group }}
+          path: .coverage.${{ matrix.split-group }}
+          retention-days: 7
+          # A dotfile, and upload-artifact skips hidden files by default --
+          # the same trap that silently emptied the durations upload.
+          include-hidden-files: true
+
+  coverage-report:
+    # Each shard measures a third of the suite: this is where the nightly
+    # coverage number is actually produced. Deliberately NOT `if: always()` --
+    # a report combined from a subset of the shards would read as the project
+    # number while missing whatever the failed shard covered.
+    needs: coverage-full
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # `coverage` alone, not the whole dev stack: combining and reporting
+      # needs the data files and the sources, not an importable mace.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "coverage[toml]"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-data-*
+          merge-multiple: true
+      - name: Combine the shards
+        run: |
+          coverage combine
+          coverage xml
+          coverage html
       - name: Coverage summary
-        if: always()
         run: |
           {
             echo '## Full-scope CPU coverage (nightly)'
@@ -182,7 +244,6 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
         with:
           name: coverage-full
           path: |
@@ -215,3 +276,7 @@ jobs:
           name: test-durations
           path: tests/.test_durations
           retention-days: 30
+          # The path is a dotfile and upload-artifact skips hidden files by
+          # default: without this the job stayed green while uploading nothing,
+          # so the committed durations silently went stale.
+          include-hidden-files: true
