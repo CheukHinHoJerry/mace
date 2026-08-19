@@ -94,6 +94,7 @@ def _energy(model, pos, mag):
 # ----------------------------------------------------------
 # O(3)_space x O(3)_spin equivariance tests
 # ----------------------------------------------------------
+@pytest.mark.parametrize("hidden", ["8x0e", "8x0e+8x1o", "8x0e+8x1o+8x2e"])
 @pytest.mark.parametrize("max_ell", [1, 2, 3])
 @pytest.mark.parametrize(
     "name,rot_pos,rot_mag",
@@ -107,7 +108,7 @@ def _energy(model, pos, mag):
         ("rotate both and reverse moments", _R, -_S),
     ],
 )
-def test_spin_and_space_rotate_independently(max_ell, name, rot_pos, rot_mag):
+def test_spin_and_space_rotate_independently(max_ell, hidden, name, rot_pos, rot_mag):
     """Space and spin rotate INDEPENDENTLY, so the enforced group is O(3) x O(3).
 
     Independently is the operative word. The magmom angular parts contract among
@@ -125,12 +126,13 @@ def test_spin_and_space_rotate_independently(max_ell, name, rot_pos, rot_mag):
     at zero field.
     """
     with default_dtype(torch.float64):
-        model = _build(max_ell=max_ell)
+        model = _build(max_ell=max_ell, hidden=hidden)
         base = _energy(model, _POS, _MAG)
         moved = _energy(model, _POS @ rot_pos.T, _MAG @ rot_mag.T)
-        assert (
-            abs(moved - base) < _TOL
-        ), f"{name} changed the energy by {abs(moved - base):.3e} at max_ell={max_ell}"
+        assert abs(moved - base) < _TOL, (
+            f"{name} changed the energy by {abs(moved - base):.3e} at "
+            f"max_ell={max_ell}, hidden={hidden}"
+        )
 
 
 # ----------------------------------------------------------
@@ -193,4 +195,85 @@ def test_no_dead_block_weights():
         assert not starved, (
             f"{len(starved)} of {len(weights)} block weights received no gradient "
             f"(indices {starved}); they slice empty ranges and train as if absent"
+        )
+
+
+# ----------------------------------------------------------
+# Spin purity of the magnetic factor
+# ----------------------------------------------------------
+@pytest.mark.parametrize("hidden", ["8x0e", "8x0e+8x1o", "8x0e+8x1o+8x2e"])
+def test_magnetic_message_is_spin_pure(hidden):
+    """conv_tp_m's output is the SPIN axis of A_msg, so a spatial rotation must not move it.
+
+    This is the property the energy identities rest on, tested directly rather than
+    through the energy: if spatial angular content reaches the spin factor it is later
+    reduced against the magmom CG basis, which admits SOC-type invariants such as
+    node 1o (x) magmom 1o -> 0e, i.e. r.m. Those survive a JOINT rotation and so are
+    invisible to a joint-rotation check, but they break E(Rr, m) = E(r, m).
+    """
+    with default_dtype(torch.float64):
+        model = _build(max_ell=2, hidden=hidden)
+        block = model.interactions[1]
+        captured = {}
+
+        def hook(_module, _inputs, output):
+            captured.setdefault("m_msg", []).append(output.detach().clone())
+
+        handle = block.conv_tp_m.register_forward_hook(hook)
+        try:
+            _energy(model, _POS, _MAG)
+            _energy(model, _POS @ _R.T, _MAG)
+        finally:
+            handle.remove()
+
+        base, rotated = captured["m_msg"]
+        drift = float((rotated - base).abs().max())
+        assert drift < _TOL, (
+            f"the magnetic message moved by {drift:.3e} under a pure spatial rotation "
+            f"at hidden={hidden}; the spin factor is carrying spatial content"
+        )
+
+
+def test_scalar_restriction_is_a_noop_for_scalar_features():
+    """Restricting conv_tp_m to the l=0 features must not change a scalar-hidden model.
+
+    Existing non-SOC checkpoints are all scalar-hidden, so this is the backward
+    compatibility guarantee: for hidden="8x0e" the restriction selects everything and
+    the slice is the identity.
+    """
+    with default_dtype(torch.float64):
+        model = _build(max_ell=2, hidden="8x0e")
+        block = model.interactions[1]
+        assert block.n_node_feats_scalar == o3.Irreps(block.node_feats_irreps).dim, (
+            "for scalar node features the restriction must select the whole tensor, "
+            "otherwise previously trained models change numerically"
+        )
+        assert o3.Irreps(block.conv_tp_m.irreps_in1) == o3.Irreps(
+            block.node_feats_irreps
+        )
+
+
+def test_scalars_are_listed_first():
+    """forward() takes a contiguous scalar slice, which is only valid if scalars lead."""
+    with default_dtype(torch.float64):
+        for hidden in ("8x0e", "8x0e+8x1o", "8x0e+8x1o+8x2e"):
+            block = _build(max_ell=2, hidden=hidden).interactions[1]
+            irreps = o3.Irreps(block.node_feats_irreps)
+            assert (
+                irreps[0].ir.l == 0
+            ), f"{hidden}: scalars must come first, got {irreps}"
+
+
+def test_spatial_path_keeps_full_angular_resolution():
+    """The restriction applies to the SPIN factor only; geometry keeps its l > 0 features."""
+    with default_dtype(torch.float64):
+        block = _build(max_ell=2, hidden="8x0e+8x1o").interactions[1]
+        assert o3.Irreps(block.conv_tp_r.irreps_in1).lmax == 1, (
+            "conv_tp_r must still receive the full node features; restricting the "
+            "spatial path would cost real angular resolution"
+        )
+        assert o3.Irreps(block.conv_tp_m.irreps_in1).lmax == 0
+        assert o3.Irreps(block.conv_tp_m.irreps_in2).lmax > 0, (
+            "the magmom attributes must still enter at full max_m_ell; the spin angular "
+            "structure is not what gets restricted"
         )

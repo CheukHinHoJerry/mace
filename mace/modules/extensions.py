@@ -2290,31 +2290,6 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                     radial_MLP=getattr(i0, "radial_MLP", None),
                 )
             )
-        # SCALAR node features only, for every MAGNETIC layer.
-        #
-        # A magnetic non-SOC block builds its magnetic message with
-        #     conv_tp_m = TensorProduct(node_feats_irreps, magmom_node_attrs_irreps)
-        # and uses the result as the SPIN axis of
-        #     A_msg = einsum("bkl,bkp->bklp", r_msg, m_msg).
-        # With scalar node features that product is a channel mix of the magmom attributes,
-        # so the spin axis is spin-only. With lmax > 0 it also carries SPATIAL content, which
-        # the contraction then reduces against the magmom CG basis, and the energy stops being
-        # invariant under a spatial rotation.
-        #
-        # The check must be on each magnetic layer's INPUT, not on its own target: the input
-        # is the PREVIOUS layer's output, so an L>0 earlier layer contaminates a magnetic
-        # layer whose own target is scalar (e.g. per-layer ["128x0e+128x1o", "128x0e"]).
-        for i, inter in enumerate(self.interactions):
-            if not hasattr(inter, "conv_tp_m"):
-                continue
-            in_irreps = o3.Irreps(inter.node_feats_irreps)
-            assert in_irreps.lmax == 0, (
-                f"magnetic layer {i} receives node_feats={in_irreps} (lmax={in_irreps.lmax}); "
-                "the non-SOC model supports SCALAR node features into magnetic layers only. "
-                "Non-scalar features leak spatial content into the spin axis of A_msg and "
-                "break rotational invariance."
-            )
-
         self.products = products
 
     def _saturate_magmom(

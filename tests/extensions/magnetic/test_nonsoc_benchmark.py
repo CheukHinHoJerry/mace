@@ -146,34 +146,41 @@ def test_magnetic_message_is_spin_pure_in_the_reference():
 
 
 # ----------------------------------------------------------
-# Non-scalar hidden irreps are rejected
+# Non-scalar hidden irreps are supported
 # ----------------------------------------------------------
 @pytest.mark.parametrize(
     "hidden",
     [
         "16x0e+16x1o",
         "16x0e+16x1o+16x2e",
-        # per-layer: an L>0 FIRST layer still feeds L>0 into the magnetic layer,
+        # per-layer: an L>0 FIRST layer feeds L>0 into the magnetic layer,
         # even though that layer's own target is scalar
         ["16x0e+16x1o", "16x0e"],
     ],
 )
-def test_nonscalar_hidden_irreps_are_rejected(hidden):
-    """Only scalar hidden features are supported, and the model must say so loudly.
+def test_nonscalar_hidden_irreps_stay_equivariant(hidden):
+    """L > 0 hidden features are supported and must not break spatial invariance.
 
-    A magnetic non-SOC layer builds its magnetic message from the node features
-    and the magmom attributes, then uses it as the spin axis of A_msg. Non-scalar
-    node features put spatial content on that axis, which the contraction reduces
-    against the magmom CG basis, and the energy stops being invariant under a
-    spatial rotation.
+    A magnetic non-SOC layer builds its magnetic message from the node features and
+    the magmom attributes, then uses it as the spin axis of A_msg. Only the l = 0 part
+    of the node features is allowed onto that axis; otherwise spatial content is
+    reduced against the magmom CG basis and the energy stops being invariant under a
+    spatial rotation alone.
 
-    Checking only the final target would not catch this: with two interactions the
-    last layer is forced to scalars anyway while the preceding one still emits
-    lmax > 0 features into the next conv_tp_m.
+    The per-layer case matters because a magnetic layer's input is the PREVIOUS layer's
+    output: with two interactions the last layer is forced to scalars anyway while the
+    preceding one still emits lmax > 0 features into the next conv_tp_m.
     """
     with default_dtype(torch.float64):
-        with pytest.raises(AssertionError, match="SCALAR node features"):
-            build_reference(hidden=hidden)
+        model = build_reference(hidden=hidden)
+        pos, mag = _state()
+        R = torch.tensor(Rot.random(rng=1).as_matrix(), dtype=torch.float64)
+        base = _energy(model, pos, mag)
+        rotated = _energy(model, pos @ R.T, mag)
+        assert abs(rotated - base) < 1e-12, (
+            f"hidden={hidden}: a pure spatial rotation changed the energy by "
+            f"{abs(rotated - base):.3e}"
+        )
 
 
 # ----------------------------------------------------------

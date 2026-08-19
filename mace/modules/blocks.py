@@ -2107,13 +2107,33 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(
             cueq_config=None,
         )
 
+        # The spin factor must stay spin-pure. conv_tp_m's output is consumed as the SPIN
+        # axis of A_msg, so any spatial angular content entering here is later reduced
+        # against the magmom CG basis -- a spatial index contracted as a spin index. That
+        # admits SOC-type invariants (node 1o (x) magmom 1o -> 0e is r.m), which are
+        # invariant under a JOINT rotation but not under rotating space alone, breaking
+        # E(Rr, m) = E(r, m). Restricting to the l=0 part keeps the product a channel mix
+        # of the magmom attributes, which is spin-pure for any hidden_irreps.
+        # For scalar node_feats this is a no-op (bit-identical), so existing L=0
+        # checkpoints are unaffected. See mace/modules/docs/nonsoc_model_spec.md.
+        self.node_feats_scalar_irreps = o3.Irreps(
+            [(mul, ir) for mul, ir in self.node_feats_irreps if ir.l == 0]
+        )
+        assert (
+            len(self.node_feats_irreps) == 0 or self.node_feats_irreps[0].ir.l == 0
+        ), (
+            f"node_feats={self.node_feats_irreps} does not list its scalars first; "
+            "the contiguous slice taken in forward() would pick up non-scalars."
+        )
+        self.n_node_feats_scalar = self.node_feats_scalar_irreps.dim
+
         irreps_m_mid, instr_m = tp_out_irreps_with_instructions(
-            self.node_feats_irreps,
+            self.node_feats_scalar_irreps,
             self.magmom_node_attrs_irreps,
             self.target_irreps,
         )
         self.conv_tp_m = TensorProduct(
-            self.node_feats_irreps,
+            self.node_feats_scalar_irreps,
             self.magmom_node_attrs_irreps,
             irreps_m_mid,
             instructions=instr_m,
@@ -2246,7 +2266,9 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(
 
         r_msg = self.conv_tp_r(node_feats[sender], edge_attrs, tp_r_weights)
         m_msg = self.conv_tp_m(
-            node_feats[sender], magmom_node_attrs[sender], tp_m_weights
+            node_feats[sender][:, : self.n_node_feats_scalar],
+            magmom_node_attrs[sender],
+            tp_m_weights,
         )
 
         if self._project_messages:
