@@ -2241,9 +2241,11 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
             self.mag_solid_harmoics.SH.l_max()
         )
 
+        # Bind i0 unconditionally: it is the ORIGINAL layer-0 interaction and its
+        # radial_MLP is read further down for every layer, magnetic first block or not.
+        i0 = self.interactions[0]
         # Rebuild layer-0 interaction as the real (plain) first block, without magmom.
         if not first_is_magnetic:
-            i0 = self.interactions[0]
             self.interactions[0] = first_cls(
                 node_attrs_irreps=i0.node_attrs_irreps,
                 node_feats_irreps=i0.node_feats_irreps,
