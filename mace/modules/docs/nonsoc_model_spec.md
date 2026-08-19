@@ -144,6 +144,56 @@ a magnetic second layer even when that layer's own `target_irreps` is scalar. An
 assertion MUST inspect `inter.node_feats_irreps`, never `inter.target_irreps`.
 
 
+## 3.4 The centre moment must couple to its neighbours (normative)
+
+The magmom slots of `A` are contracted against a magmom CG basis. Contracting them ONLY to
+a spin scalar leaves the centre moment able to re-enter through invariants of `|m_i|`
+alone, and the model then cannot represent the ordinary exchange term
+
+    E  \supset  J_ij(R) * m_i . m_j                                                   (T)
+
+because in a dimer that is the only spin invariant besides the norms. Symptom: the energy
+is EXACTLY invariant (bitwise, float64) when one moment is rotated and the other held
+fixed. Neighbour-neighbour coupling still works in that broken state -- the pooled `A` is a
+sum of rank-1 edge terms -- so a trimer responds while a dimer does not, and only the dimer
+test detects it.
+
+The contraction MUST therefore also build spin-EQUIVARIANT channels,
+
+    Gamma_{i,mu} = [ U^{s}_magmom  A^{(x)nu} ]_mu ,
+    E \supset [ Gamma_i (x) M_i ]_0 = sum_mu Gamma_{i,mu} M_{i,mu} ,
+
+where `M_i` is the l=s block of the centre's magmom attributes. At s = 1, nu = 1 this is
+exactly `sum_j J(r_ij) m_i . m_j`, so **s = 1 is sufficient for Heisenberg**; s = 2 carries
+the biquadratic `(m_i . m_j)^2` order, and so on. A channel MUST be built for every
+**s = 1 .. max_m_ell** and every nu up to the correlation order. s stops at max_m_ell
+because the centre attributes stop there; nu is capped at 3.
+
+Retaining every sector matters. At max_ell=3 / max_m_ell=2 / nu=3:
+
+| centre-spin sector | sum_lambda n_r^lambda . n_m^lambda | joint rank |
+|--------------------|------------------------------------|------------|
+| s = 0 (0e)         | 8(5) + 7(3) + 1(0)                 | 61         |
+| s = 1 (1o)         | 8(5) + 7(7) + 1(2)                 | 91         |
+| s = 2 (2e)         | 8(6) + 7(8) + 1(1)                 | 105        |
+| **total**          |                                    | **257**    |
+
+from the S_3 isotypic decompositions
+`H_r^{0e} = 8[3] + 7[2,1] + 1[1,1,1]`, `H_m^{0e} = 5[3] + 3[2,1]`,
+`H_m^{1o} = 5[3] + 7[2,1] + 2[1,1,1]`, `H_m^{2e} = 6[3] + 8[2,1] + 1[1,1,1]`.
+Only MATCHING permutation-symmetry sectors survive the joint symmetrisation, which is why
+the products are taken lambda by lambda. Stopping at s = 1 retains 152 of 257 (T).
+
+Time reversal is automatic and MUST NOT be enforced by hand: the e3nn parity slot tracks T
+(section 2), so an irreps_out of parity (-1)^s admits only neighbour combinations whose
+T-parity matches `M_i`'s, making every product T-even. Hence 0e, 1o, 2e, ...
+
+Implemented in `NonSOCContraction` as the `U_matrix_magmom_s{s}_{nu}` buffers with matching
+`center_weights["s{s}_nu{nu}"]`; `blocks.py` passes the full magmom attributes through what
+was previously an unused argument, and the contraction slices the l=s block at
+`[s^2 : (s+1)^2]` -- valid because the attributes are unit-multiplicity spherical harmonics,
+which is checked at construction. Always on.
+
 ## 4. Joint slot symmetrisation
 
 The symmetric contraction symmetrises the paired slots jointly:
@@ -153,6 +203,36 @@ The symmetric contraction symmetrises the paired slots jointly:
 ONE permutation `pi` is applied to BOTH angular factors, because slot `k` of the product
 carries the pair `(l_k, p_k)`; permuting the spatial factors alone is not a symmetry of the
 object being contracted.
+
+### 4.1 The construction is complete (verified)
+
+A natural worry is that building `U^space` and `U^spin` separately spans only
+`Sym^nu(V_r) (x) Sym^nu(V_m)`, losing the mixed Young-symmetry parts of
+`Sym^nu(V_r (x) V_m) = (+)_lambda S^lambda(V_r) (x) S^lambda(V_m)` (Cauchy). It does not.
+
+`_wigner_nj` returns the FULL UNSYMMETRISED coupling-tree basis, not the symmetric one:
+for `V_r = 0e+1o+2e -> 0e` at nu=3 it gives 11 paths where `dim Sym^3 -> 0e` is only 5.
+So `{U_s^k}` is a basis of all of `Hom(V_r^{(x)nu}, target)` and `{U_m^q}` of all of
+`Hom(V_m^{(x)nu}, trivial)`; their products span the whole equivariant space, and
+contracting against `A^{(x)nu}` (the same `A` nu times) projects onto exactly the
+joint-symmetric subspace. The lambda=(2,1) channels are therefore reached.
+
+Measured joint rank vs the true dimension, target (spatial 0e, spin T-even):
+
+| case                   | nu | joint rank | Sym(x)Sym | true joint |
+|------------------------|----|------------|-----------|------------|
+| max_ell=2, max_m_ell=1 | 3  | 13         | 10        | 13         |
+| max_ell=2, max_m_ell=2 | 3  | 34         | 25        | 34         |
+| max_ell=3, max_m_ell=2 | 3  | 61         | 40        | 61         |
+
+Rank ABOVE Sym(x)Sym is the signature that mixed symmetry is reached; equality with the
+true dimension is the completeness statement (T).
+
+**When computing the true dimension, parity MUST be included.** Integrating SO(3)
+characters alone treats every spin-l=0 piece as trivial, but in this model the spin parity
+slot tracks TIME REVERSAL (section 2), so a T-ODD l=0 piece is not the trivial rep. Ignoring
+this overcounts the spin side and manufactures a phantom expressivity hole -- at nu=3 it
+inflates 13/34/61 to 16/45/92. Both sides must be integrated over O(3), not SO(3).
 
 Consequences for testing:
 
@@ -189,14 +269,38 @@ discarding the symmetry, and a validation curve cannot distinguish that from pro
 **Validation error is not evidence of correctness for a symmetry-constrained model.**
 (The two runs also differed in `batch_size`, 100 vs 32, so it was not even controlled.)
 
-### 5.2 Confusing the two parity conventions
+### 5.2 Spin-scalar-only magmom contraction (the exchange hole)
+
+Contracting the magmom slots only to `0e` costs the model the Heisenberg term, as in 3.4.
+Measured on a synthetic fit of `E = J(r) m_0 . m_1` over dimers with unit moments (so the
+`|m|` channels carry no information):
+
+| centre-spin channel | final MSE | as % of target variance |
+|---------------------|-----------|-------------------------|
+| absent              | 1.75e-03  | 96.45%  (no better than predicting the mean) |
+| present             | 5.25e-06  | 0.29%                                        |
+
+Like 5.1, this is invisible to a validation curve: the model simply fits whatever it can
+reach and reports a plausible error.
+
+### 5.3 Confusing the two parity conventions
 
 Applying the axial `0e+1e+2e` convention to the non-SOC model, or `0e+1o+2e` to the
 diagonal model, changes which paths are admitted. Parameter counts may still match, so a
 count comparison does NOT detect it. Enumerate the contraction paths before and after any
 parity change and evaluate every newly admitted path on random multichannel inputs (T).
 
-### 5.3 Conditional binding of the layer-0 interaction
+### 5.3b Spin resolution truncated by the spatial max_ell
+
+`conv_tp_m`'s output MUST be filtered by the MAGMOM angular range, never by the
+interaction's `target_irreps`. The latter carries the SPATIAL `max_ell`, and space and spin
+are independent factors of the group, so using it silently truncated the spin axis at
+`max_ell`: `max_m_ell > max_ell` then built a magmom CG basis that no longer matched the
+tensor it contracts, surfacing as a raw einsum size error rather than a diagnosable message.
+Since `conv_tp_m`'s first input is scalar-only, admitting every magmom irrep is exactly
+right, and it is a no-op whenever `max_m_ell <= max_ell`.
+
+### 5.4 Conditional binding of the layer-0 interaction
 
 `i0 = self.interactions[0]` MUST be bound unconditionally. It was previously bound inside
 `if not first_is_magnetic:` while being read further down for every layer
@@ -207,7 +311,7 @@ block raised `UnboundLocalError` at construction. Every run to date used a plain
 Lesson: a configuration that no existing run happens to use is still a supported
 configuration, and the test matrix MUST cover magnetic-first as well as plain-first.
 
-### 5.4 Block offsets under `reshape_irreps`
+### 5.5 Block offsets under `reshape_irreps`
 
 `reshape_irreps` factors multiplicity into the channel axis, so block offsets MUST stride
 by `ir.dim`, not `mul * ir.dim`. The wrong stride stays equivariant at 128 channels but
@@ -225,8 +329,14 @@ A change to any magnetic path is not complete until these pass.
    pure spatial rotation of the positions.
 3. **Path enumeration**: contraction paths before/after the change, with every newly
    admitted path evaluated on random multichannel inputs.
-4. **Non-degenerate fixtures**: `n_edges != n_nodes != n_graphs`. A fixture with
+4. **Joint completeness**: the rank of `_joint_symmetrised_probe` equals the true joint
+   dimension computed with O(3) characters on BOTH sides (section 4.1). Comparing against
+   an SO(3)-only count reports a hole that is not there.
+5. **Dimer spin-angle sensitivity**: rotating ONE moment of a dimer while holding the
+   other fixed MUST change the energy. A trimer is not a substitute -- it responds through
+   neighbour-neighbour coupling even when centre-neighbour coupling is absent.
+6. **Non-degenerate fixtures**: `n_edges != n_nodes != n_graphs`. A fixture with
    `n_edges == n_nodes` has previously let a shape bug pass by coincidence.
 
-Test 1 is cheap and MUST run in CI. The L1 episode cost a full 100-epoch training run that
+Tests 1 and 5 are cheap and MUST run in CI. The L1 episode cost a full 100-epoch training run that
 produced a checkpoint nobody could use; the test that would have caught it takes seconds.
