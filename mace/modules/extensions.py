@@ -1486,7 +1486,7 @@ class MagneticMACE(torch.nn.Module):
         oeq_config: Optional[Dict[str, Any]] = None,
         lammps_mliap: Optional[bool] = False,
         readout_cls: Optional[Type[NonLinearReadoutBlock]] = NonLinearReadoutBlock,
-        magmom_sat_scale: float = 0.0,
+        magmom_sat_scale: float = 1.0,
     ):
         super().__init__()
 
@@ -1506,18 +1506,18 @@ class MagneticMACE(torch.nn.Module):
         # models are byte-identical. See _saturate_magmom.
         self.magmom_sat_scale = float(magmom_sat_scale)
         if self.magmom_sat_scale > 0.0:
-            # Saturation divides by m_sat^2, so every element's m_max must be strictly
-            # positive; a zero would give a zero denominator and NaN at |m| = 0.
-            if min(m_max) <= 0.0:
-                raise ValueError(
-                    "magmom_sat_scale > 0 requires every m_max > 0 (m_sat = scale * "
-                    f"m_max must be positive), got m_max={list(m_max)}."
-                )
-            self.register_buffer(
-                "m_sat",
-                torch.tensor(m_max, dtype=torch.get_default_dtype())
-                * self.magmom_sat_scale,
+            # Saturation divides by m_sat^2. An element with m_max <= 0 carries no moment
+            # to bound, so give it m_sat = inf, which makes the squash the identity for
+            # that element rather than a zero denominator. Refusing to build would turn a
+            # harmless non-magnetic element into a hard failure now that this is the
+            # default.
+            sat = torch.tensor(m_max, dtype=torch.get_default_dtype())
+            sat = torch.where(
+                sat > 0.0,
+                sat * self.magmom_sat_scale,
+                torch.full_like(sat, float("inf")),
             )
+            self.register_buffer("m_sat", sat)
         self.register_buffer(
             "num_interactions", torch.tensor(num_interactions, dtype=torch.int64)
         )
@@ -2381,12 +2381,18 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
         ].unsqueeze(-1)
         element_dependent_scaling.requires_grad_(True)
         element_dependent_scaling.retain_grad()
-        magmom_lenghts_trans = (
-            1
-            - 2
-            * torch.clamp(magmom_lenghts / element_dependent_scaling, min=0.0, max=1.0)
-            ** 2
-        )
+        # Chebyshev input in [-1, 1]. A hard clamp at |m| = m_max makes the map C0 only:
+        # dE/d|m| jumps across m_max, and magforces = -dE/dM is a FITTED target, so the
+        # kink sits directly in the loss. When saturation is on, reuse the same smooth
+        # squash the solid harmonics use, which is C-infinity and maps [0, inf) -> [0, 1).
+        # With magmom_sat_scale = 0 the original clamp is kept exactly, so models trained
+        # before this change reproduce bit-for-bit.
+        u = magmom_lenghts / element_dependent_scaling
+        if getattr(self, "magmom_sat_scale", 0.0) > 0.0:
+            u = u / torch.sqrt(1.0 + u * u)
+        else:
+            u = torch.clamp(u, min=0.0, max=1.0)
+        magmom_lenghts_trans = 1 - 2 * u**2
         magmom_node_attrs = self.mag_solid_harmoics(
             self._saturate_magmom(data["magmom"], data["node_attrs"])
         )

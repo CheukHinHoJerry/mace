@@ -1215,10 +1215,13 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "--magmom_sat_scale",
         help="If > 0, saturate the moment fed to the solid harmonics at "
         "m_sat = magmom_sat_scale * m_max, angle-preserving and smooth "
-        "(m_eff = m / sqrt(1 + |m|^2 / m_sat^2)). 0.0 disables it and the raw moment "
-        "is used. Requires every m_max > 0.",
+        "(m_eff = m / sqrt(1 + |m|^2 / m_sat^2)). It also replaces the hard clamp on "
+        "|m|/m_max in the scalar magnetic radial basis with the same smooth squash, so "
+        "magforces stay C1 across m_max. 0.0 disables both and restores the raw moment "
+        "plus the clamp, reproducing models trained before this default changed. "
+        "Requires every m_max > 0.",
         type=float,
-        default=0.0,
+        default=1.0,
     )
     parser.add_argument(
         "--one_body_spectral_degree",
