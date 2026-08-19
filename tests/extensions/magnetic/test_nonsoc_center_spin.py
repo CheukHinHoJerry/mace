@@ -18,6 +18,8 @@ _S = Rot.from_euler("xyz", [23, -51, 17], degrees=True).as_matrix()
 _R = Rot.from_euler("xyz", [11, 73, -40], degrees=True).as_matrix()
 _DIMER = np.array([[0.0, 0.0, 0.0], [2.1, 0.0, 0.0]])
 _MAG2 = np.array([[0.3, 1.4, 0.7], [1.1, -0.5, 0.9]])
+_TRIMER3 = np.array([[0.0, 0.0, 0.0], [2.1, 0.0, 0.0], [1.0, 1.8, 0.0]])
+_MAG3 = np.array([[0.3, 1.4, 0.7], [1.1, -0.5, 0.9], [-0.6, 0.4, 1.2]])
 
 
 def _batch(pos, mag):
@@ -232,3 +234,36 @@ def test_correlation_above_three_is_rejected():
     with default_dtype(torch.float64):
         with pytest.raises(ValueError, match="correlation <= 3"):
             _build(correlation=4)
+
+
+def test_every_parameter_receives_a_gradient():
+    """No parameter may be dead.
+
+    The merged Q layout supersedes the old per-(s) and s=0 weight tensors. Leaving those
+    registered costs nothing on a single GPU -- they simply never train -- but DDP treats
+    a parameter that receives no gradient as a synchronisation error and aborts the run
+    with "Expected to have finished reduction in the prior iteration". A single-GPU test
+    suite cannot see that, so it is asserted directly here.
+    """
+    with default_dtype(torch.float64):
+        for max_m_ell in (1, 2):
+            for correlation in (2, 3):
+                model = _build(correlation=correlation, max_m_ell=max_m_ell)
+                model.zero_grad(set_to_none=True)
+                out = model(
+                    _batch(_TRIMER3, _MAG3),
+                    training=True,
+                    compute_force=False,
+                    compute_stress=False,
+                )
+                out["energy"].sum().backward()
+                dead = [
+                    name
+                    for name, param in model.named_parameters()
+                    if param.requires_grad
+                    and (param.grad is None or not bool(param.grad.abs().sum() > 0))
+                ]
+                assert not dead, (
+                    f"max_m_ell={max_m_ell}, correlation={correlation}: "
+                    f"{len(dead)} parameter(s) received no gradient: {dead[:6]}"
+                )

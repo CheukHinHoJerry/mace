@@ -5,16 +5,13 @@
 import logging
 from typing import Dict, List, Optional, Union
 
-import opt_einsum_fx
 import torch
-import torch.fx
 from e3nn import o3
 from e3nn.util.codegen import CodeGenMixin
 from opt_einsum import contract
 
 from mace.tools.cg import U_matrix_real, _wigner_nj
 
-BATCH_EXAMPLE = 10
 ALPHABET = ["w", "x", "v", "n", "z", "r", "t"]
 ALPHABET_MAGMOM = ["y", "u", "o", "p", "s"]
 NONSOC_CONTRACTION_EQUATIONS = {
@@ -203,7 +200,7 @@ class NonSOCContraction(torch.nn.Module):
         correlation: int,
         internal_weights: bool = True,
         num_elements: Optional[int] = None,
-        weights: Optional[torch.Tensor] = None,
+        weights: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
         magmom_irreps: Optional[o3.Irreps] = None,
         chunk_size: Optional[int] = 250,
         center_spin_coupling: bool = True,
@@ -349,58 +346,10 @@ class NonSOCContraction(torch.nn.Module):
                     )[-1]
                     self.register_buffer(f"U_matrix_magmom_s{s_order}_{nu}", U_matrix)
 
-        # Tensor contraction equations
-        self.contractions_weighting = torch.nn.ModuleList()
-        self.contractions_features = torch.nn.ModuleList()
-
-        # Create weight for product basis
-        self.weights = torch.nn.ParameterList([])
-        lower_order_weights = []
-
-        for i in range(correlation, 0, -1):
-            # Shapes definying
-            num_params = self.U_tensors(i).size()[-1]
-            num_params_magmom = self.U_magmom_tensors(i).size()[-1]
-            _num_equivariance = 2 * irrep_out.lmax + 1
-            _num_ell = self.U_tensors(i).size()[-2]
-
-            if i == correlation:
-                # Parameters for the product basis
-                w = torch.nn.Parameter(
-                    torch.randn(
-                        (num_elements, num_params, num_params_magmom, self.num_features)
-                    )
-                    / (num_params * num_params_magmom)
-                )
-                self.weights_max = w
-            else:
-                # Parameters for lower-order product basis terms.
-                # Keep list ordered by nu ascending: weights[0] -> nu=1, weights[1] -> nu=2, ...
-                w = torch.nn.Parameter(
-                    torch.randn(
-                        (num_elements, num_params, num_params_magmom, self.num_features)
-                    )
-                    / (num_params * num_params_magmom)
-                )
-                lower_order_weights.append(w)
-        # Rebuild in ascending nu order: weights[0] -> nu=1, weights[1] -> nu=2, ...
-        if len(lower_order_weights) > 0:
-            self.weights = torch.nn.ParameterList(list(reversed(lower_order_weights)))
-
-        # Matching weights, one tensor per (centre-spin order, correlation order).
-        if self.center_spin_coupling:
-            center_weights = {}
-            for s_order in self.center_spin_orders:
-                for nu in range(1, correlation + 1):
-                    num_params = self.U_tensors(nu).size()[-1]
-                    num_params_s = self.U_magmom_center_tensors(s_order, nu).size()[-1]
-                    center_weights[f"s{s_order}_nu{nu}"] = torch.nn.Parameter(
-                        torch.randn(
-                            (num_elements, num_params, num_params_s, self.num_features)
-                        )
-                        / (num_params * num_params_s)
-                    )
-            self.center_weights = torch.nn.ParameterDict(center_weights)
+        # The old per-(s) and s=0 weight tensors are NOT created: the merged Q layout
+        # below supersedes them. Leaving them registered made each one a parameter that
+        # never receives a gradient, which trains fine on a single GPU but makes DDP abort
+        # with "Expected to have finished reduction in the prior iteration".
 
         # Merged magnetic basis: fold (s, spin component c, path) into ONE index Q.
         #
@@ -459,8 +408,11 @@ class NonSOCContraction(torch.nn.Module):
         self.merged_weights = torch.nn.ParameterDict(merged)
 
         if not internal_weights:
-            self.weights = weights[:-1]
-            self.weights_max = weights[-1]
+            raise ValueError(
+                "NonSOCContraction supports internal weights only: the merged Q layout "
+                "has one weight tensor per correlation order, so externally supplied "
+                "per-path weights have nothing to bind to."
+            )
 
         # Defensive: the magmom side must actually contribute. U_matrix_real returns an
         # all-zero U with num_params==1 when no CG path exists; if that ever happened for
@@ -472,90 +424,6 @@ class NonSOCContraction(torch.nn.Module):
                     f"magmom CG basis U_magmom_{nu} is all-zero for irreps_in="
                     f"{self.coupling_irreps_magmom}->0e; magmom coupling would be dead."
                 )
-
-    def _build_optimized_contraction(self, nu: int) -> torch.nn.Module:
-        dtype = self.weights_max.dtype
-        device = self.weights_max.device
-        u = self.U_tensors(nu)
-        um = self.U_magmom_tensors(nu)
-        weight = self.weights_max if nu == self.correlation else self.weights[nu - 1]
-        num_ell_r = int(self.U_tensors(1).size(-2))
-        num_ell_m = int(self.U_magmom_tensors(1).size(-2))
-        x_example = torch.randn(
-            (BATCH_EXAMPLE, self.num_features, num_ell_r, num_ell_m),
-            dtype=dtype,
-            device=device,
-        )
-        y_example = torch.randn(
-            (BATCH_EXAMPLE, weight.shape[0]),
-            dtype=dtype,
-            device=device,
-        )
-
-        if nu == 1:
-            graph_module = torch.fx.symbolic_trace(
-                lambda u_t, um_t, w_t, x_t, y_t: torch.einsum(
-                    NONSOC_CONTRACTION_EQUATIONS[1], u_t, um_t, w_t, x_t, y_t
-                )
-            )
-            example_inputs = (
-                torch.randn(tuple(u.shape), dtype=dtype, device=device),
-                torch.randn(tuple(um.shape), dtype=dtype, device=device),
-                torch.randn(tuple(weight.shape), dtype=dtype, device=device),
-                x_example,
-                y_example,
-            )
-        elif nu == 2:
-            graph_module = torch.fx.symbolic_trace(
-                lambda u_t, um_t, w_t, x0_t, x1_t, y_t: torch.einsum(
-                    NONSOC_CONTRACTION_EQUATIONS[2], u_t, um_t, w_t, x0_t, x1_t, y_t
-                )
-            )
-            example_inputs = (
-                torch.randn(tuple(u.shape), dtype=dtype, device=device),
-                torch.randn(tuple(um.shape), dtype=dtype, device=device),
-                torch.randn(tuple(weight.shape), dtype=dtype, device=device),
-                x_example,
-                x_example,
-                y_example,
-            )
-        elif nu == 3:
-            graph_module = torch.fx.symbolic_trace(
-                lambda u_t, um_t, w_t, x0_t, x1_t, x2_t, y_t: torch.einsum(
-                    NONSOC_CONTRACTION_EQUATIONS[3],
-                    u_t,
-                    um_t,
-                    w_t,
-                    x0_t,
-                    x1_t,
-                    x2_t,
-                    y_t,
-                )
-            )
-            example_inputs = (
-                torch.randn(tuple(u.shape), dtype=dtype, device=device),
-                torch.randn(tuple(um.shape), dtype=dtype, device=device),
-                torch.randn(tuple(weight.shape), dtype=dtype, device=device),
-                x_example,
-                x_example,
-                x_example,
-                y_example,
-            )
-        else:
-            raise ValueError(f"Unsupported correlation order: {nu}")
-
-        return opt_einsum_fx.optimize_einsums_full(
-            model=graph_module,
-            example_inputs=example_inputs,
-        )
-
-    def _ensure_optimized_contractions(self) -> None:
-        # pylint: disable=attribute-defined-outside-init  # lazily built on first use
-        if hasattr(self, "optimized_contractions"):
-            return
-        self.optimized_contractions = torch.nn.ModuleDict()
-        for nu in range(1, self.correlation + 1):
-            self.optimized_contractions[str(nu)] = self._build_optimized_contraction(nu)
 
     def forward_reference(
         self, x: torch.Tensor, y: torch.Tensor, m_center: Optional[torch.Tensor] = None
@@ -592,7 +460,7 @@ class NonSOCContraction(torch.nn.Module):
         use_center = self._use_center_spin(m_center)
         if not use_center:
             ones = torch.ones(
-                y.shape[0], 1, dtype=self.weights_max.dtype, device=y.device
+                y.shape[0], 1, dtype=self.merged_weights["nu1"].dtype, device=y.device
             )
             centre_cols = ones
         else:
@@ -616,7 +484,7 @@ class NonSOCContraction(torch.nn.Module):
                 v = torch.ones(
                     y.shape[0],
                     int(keep.sum()),
-                    dtype=self.weights_max.dtype,
+                    dtype=self.merged_weights["nu1"].dtype,
                     device=y.device,
                 )
                 widx = widx[keep]
@@ -645,51 +513,6 @@ class NonSOCContraction(torch.nn.Module):
             and m_center is not None
             and bool(getattr(self, "center_spin_orders", []))
         )
-
-    def forward_optimized(self, x: torch.Tensor, y: torch.Tensor):
-        assert self.irrep_out.lmax == 0
-        self._ensure_optimized_contractions()
-
-        out = None
-        for nu in range(1, self.correlation + 1):
-            weight_nu = (
-                self.weights_max if nu == self.correlation else self.weights[nu - 1]
-            )
-            optimized = self.optimized_contractions[str(nu)]
-
-            if nu == 1:
-                term = optimized(
-                    self.U_tensors(nu),
-                    self.U_magmom_tensors(nu),
-                    weight_nu,
-                    x,
-                    y,
-                )
-            elif nu == 2:
-                term = optimized(
-                    self.U_tensors(nu),
-                    self.U_magmom_tensors(nu),
-                    weight_nu,
-                    x,
-                    x,
-                    y,
-                )
-            elif nu == 3:
-                term = optimized(
-                    self.U_tensors(nu),
-                    self.U_magmom_tensors(nu),
-                    weight_nu,
-                    x,
-                    x,
-                    x,
-                    y,
-                )
-            else:
-                raise ValueError(f"Unsupported correlation order: {nu}")
-
-            out = term if out is None else (out + term)
-
-        return out.view(out.shape[0], -1)
 
     def forward(
         self, x: torch.Tensor, y: torch.Tensor, m_center: Optional[torch.Tensor] = None
