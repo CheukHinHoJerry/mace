@@ -683,6 +683,24 @@ class EquivariantProductBasisNonSOCWithSelfMagmomBlock(torch.nn.Module):
                 num_elements=num_elements,
                 magmom_irreps=self.magmom_node_attrs_irreps,
             )
+            # The contraction slices the centre moment's l=s block itself, which is only
+            # valid if the magmom attributes are unit-multiplicity spherical harmonics
+            # laid out 0e, 1o, 2e, ... so that l=s starts at s^2.
+            expected = o3.Irreps.spherical_harmonics(
+                o3.Irreps(self.magmom_node_attrs_irreps).lmax, p=-1
+            )
+            if o3.Irreps(self.magmom_node_attrs_irreps) != expected:
+                raise ValueError(
+                    f"magmom_node_attrs_irreps={self.magmom_node_attrs_irreps} is not the "
+                    f"spherical-harmonic layout {expected}; the centre-moment slice taken "
+                    "in NonSOCContraction would pick up the wrong block."
+                )
+            if o3.Irreps(self.magmom_node_attrs_irreps).lmax < 1:
+                raise ValueError(
+                    "max_m_ell >= 1 is required: with only l=0 magmom attributes the "
+                    "centre moment has no angular part and J_ij m_i . m_j cannot be "
+                    "represented."
+                )
         else:
             raise ValueError("Contraction class not supported")
 
@@ -728,7 +746,7 @@ class EquivariantProductBasisNonSOCWithSelfMagmomBlock(torch.nn.Module):
         sc: Optional[torch.Tensor],
         node_attrs: torch.Tensor,
         magmom_node_inv_feats: torch.Tensor,
-        magmom_node_attrs: torch.Tensor,  # pylint: disable=unused-argument
+        magmom_node_attrs: torch.Tensor,
     ) -> torch.Tensor:
         use_cueq = False
         use_cueq_mul_ir = False
@@ -741,7 +759,9 @@ class EquivariantProductBasisNonSOCWithSelfMagmomBlock(torch.nn.Module):
                 if self.cueq_config.layout_str == "mul_ir":
                     use_cueq_mul_ir = True
         if self.contraction_cls == "NonSOCSymmetricContraction":
-            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+            node_feats = self.symmetric_contractions(
+                node_feats, node_attrs, magmom_node_attrs
+            )
         elif use_cueq:
             if use_cueq_mul_ir:
                 node_feats = torch.transpose(node_feats, 1, 2)
@@ -2127,10 +2147,20 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(
         )
         self.n_node_feats_scalar = self.node_feats_scalar_irreps.dim
 
+        # Filter the spin output by the MAGMOM angular range, not by target_irreps.
+        # target_irreps carries the SPATIAL max_ell, and space and spin are independent
+        # factors of O(3)_space x SO(3)_spin: using it here silently truncated the spin
+        # axis at max_ell, so max_m_ell > max_ell produced a magmom CG basis that no
+        # longer matched the tensor it contracts (a hard einsum size error). Since in1 is
+        # scalar-only, admitting every magmom irrep is exactly the right target.
+        # No-op whenever max_m_ell <= max_ell, which covers every model trained so far.
+        magmom_target_irreps = o3.Irreps(
+            [(1, ir) for _, ir in self.magmom_node_attrs_irreps]
+        )
         irreps_m_mid, instr_m = tp_out_irreps_with_instructions(
             self.node_feats_scalar_irreps,
             self.magmom_node_attrs_irreps,
-            self.target_irreps,
+            magmom_target_irreps,
         )
         self.conv_tp_m = TensorProduct(
             self.node_feats_scalar_irreps,
