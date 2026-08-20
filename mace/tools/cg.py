@@ -31,7 +31,38 @@ _TP = collections.namedtuple("_TP", "op, args")
 _INPUT = collections.namedtuple("_INPUT", "tensor, start, stop")
 
 
+_WIGNER_NJ_CACHE: dict = {}
+
+
 def _wigner_nj(
+    irrepss: List[o3.Irreps],
+    normalization: str = "component",
+    filter_ir_mid=None,
+    dtype=None,
+):
+    # Memoize: _wigner_nj is a pure function of its arguments but is recomputed
+    # repeatedly -- U_matrix_real builds it, then _assert_wigner_nj_available rebuilds
+    # the identical basis purely to probe support (a ~464 s recompute at nu=3), and it
+    # runs again for every identical layer / output irrep / DDP rank / checkpoint load.
+    # The recursion below reuses this wrapper, so sub-bases are shared too. Returned
+    # tensors are treated read-only by all callers, so sharing the objects is safe.
+    key = (
+        tuple(str(o3.Irreps(ir)) for ir in irrepss),
+        normalization,
+        None
+        if filter_ir_mid is None
+        else tuple(str(o3.Irrep(x)) for x in filter_ir_mid),
+        str(dtype),
+    )
+    cached = _WIGNER_NJ_CACHE.get(key)
+    if cached is not None:
+        return cached
+    result = _wigner_nj_impl(irrepss, normalization, filter_ir_mid, dtype)
+    _WIGNER_NJ_CACHE[key] = result
+    return result
+
+
+def _wigner_nj_impl(
     irrepss: List[o3.Irreps],
     normalization: str = "component",
     filter_ir_mid=None,

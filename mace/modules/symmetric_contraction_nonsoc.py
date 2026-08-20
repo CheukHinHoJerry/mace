@@ -318,6 +318,13 @@ class NonSOCContraction(torch.nn.Module):
                 dtype=dtype,
                 use_cueq_cg=False,
             )[-1]
+            # Same silent-fallback hazard as the spatial basis: if _wigner_nj cannot build
+            # this correlation and cuequivariance is installed, U_matrix_real returns the
+            # reduced SYMMETRIC basis and drops the mixed Young sectors on the SPIN side,
+            # changing the represented group. Guard the magmom basis too. See spec 4.1.
+            _assert_wigner_nj_available(
+                self.coupling_irreps_magmom, nu, "magmom CG basis"
+            )
             self.register_buffer(f"U_matrix_magmom_{nu}", U_matrix)
 
         # Centre-spin channels, one per spin order s = 1 .. max_m_ell.
@@ -355,6 +362,14 @@ class NonSOCContraction(torch.nn.Module):
                         dtype=dtype,
                         use_cueq_cg=False,
                     )[-1]
+                    # Guard the centre-spin bases against the same silent cueq fallback
+                    # (dropping mixed Young sectors would break the exchange coupling's
+                    # representation). Cheap now that _wigner_nj is memoized. See spec 4.1.
+                    _assert_wigner_nj_available(
+                        self.coupling_irreps_magmom,
+                        nu,
+                        f"centre-spin CG basis (s={s_order})",
+                    )
                     self.register_buffer(f"U_matrix_magmom_s{s_order}_{nu}", U_matrix)
 
         # The old per-(s) and s=0 weight tensors are NOT created: the merged Q layout
@@ -412,9 +427,17 @@ class NonSOCContraction(torch.nn.Module):
             num_params = self.U_tensors(nu).size()[-1]
             widx = dict(self.named_buffers())[f"weight_index_{nu}"]
             num_w = int(widx.max()) + 1
+            # Match the standard MACE contraction init (symmetric_contraction.py: randn /
+            # num_params). The num_w axis is a GATHER axis -- weight_index_{nu} selects one
+            # column per Q, it is not summed over -- so the fan-in for a given output is
+            # num_params (the spatial paths), exactly as in standard MACE. Dividing by
+            # num_params * num_w over-shrinks by num_w, which at nu=3 (num_w up to hundreds
+            # of thousands of paths) initialises the high-order centre-spin (exchange)
+            # sectors effectively at zero, starving their gradients. Divide by num_params
+            # only. (Passing symmetry tests does not detect this trainability loss.)
             merged[f"nu{nu}"] = torch.nn.Parameter(
                 torch.randn((num_elements, num_params, num_w, self.num_features))
-                / (num_params * num_w)
+                / num_params
             )
         self.merged_weights = torch.nn.ParameterDict(merged)
 

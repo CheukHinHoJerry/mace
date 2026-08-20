@@ -2139,12 +2139,25 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(
         self.node_feats_scalar_irreps = o3.Irreps(
             [(mul, ir) for mul, ir in self.node_feats_irreps if ir.l == 0]
         )
-        assert (
-            len(self.node_feats_irreps) == 0 or self.node_feats_irreps[0].ir.l == 0
-        ), (
-            f"node_feats={self.node_feats_irreps} does not list its scalars first; "
-            "the contiguous slice taken in forward() would pick up non-scalars."
-        )
+        # forward() takes the CONTIGUOUS slice node_feats[:, :n_node_feats_scalar] as the
+        # spin-pure input to conv_tp_m. That is valid only if every l==0 block forms an
+        # EXACT leading prefix. Checking only that the first block is scalar is too weak
+        # (e.g. 8x0e+8x1o+8x0e passes, yet the slice spills into the 1o block and leaks a
+        # spatial index into the spin factor -- the r.m SOC term the non-SOC model
+        # forbids). Verify the full contiguous prefix, and raise (not assert, which `-O`
+        # strips). See mace/modules/docs/nonsoc_model_spec.md section 3.1.
+        _n_scalar_blocks = len(self.node_feats_scalar_irreps)
+        if (
+            o3.Irreps(self.node_feats_irreps[:_n_scalar_blocks])
+            != self.node_feats_scalar_irreps
+        ):
+            raise ValueError(
+                f"node_feats={self.node_feats_irreps} does not list ALL its l==0 scalars "
+                "as a contiguous leading prefix; the slice [:, :n_node_feats_scalar] in "
+                "forward() would mix spatial (l>0) components into the spin factor, "
+                "breaking the non-SOC spin-purity rule E(Rr,m)=E(r,m). Reorder so every "
+                "scalar irrep precedes every l>0 irrep."
+            )
         self.n_node_feats_scalar = self.node_feats_scalar_irreps.dim
 
         # Filter the spin output by the MAGMOM angular range, not by target_irreps.

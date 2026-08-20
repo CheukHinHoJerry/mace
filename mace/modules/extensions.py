@@ -2299,8 +2299,9 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
         ``m_eff = m / sqrt(1 + |m|^2 / m_sat^2)``: same direction, magnitude -> |m| for
         small moments and -> m_sat for large ones, so the cubic interaction term is
         bounded below. Written as vector * scalar(|m|^2), so it is smooth through m = 0
-        with no norm and no 0/0. Identity when the ``m_sat`` buffer is absent, which is
-        the default here, so the raw moment is used unless saturation is switched on.
+        with no norm and no 0/0. Identity when the ``m_sat`` buffer is absent, i.e. when
+        saturation is disabled with ``magmom_sat_scale=0.0``. NOTE: saturation is ON by
+        default (``magmom_sat_scale=1.0``); pass 0.0 to recover the raw-moment behaviour.
         """
         m_sat = getattr(self, "m_sat", None)
         if m_sat is None:
@@ -2385,8 +2386,9 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
         # dE/d|m| jumps across m_max, and magforces = -dE/dM is a FITTED target, so the
         # kink sits directly in the loss. When saturation is on, reuse the same smooth
         # squash the solid harmonics use, which is C-infinity and maps [0, inf) -> [0, 1).
-        # With magmom_sat_scale = 0 the original clamp is kept exactly, so models trained
-        # before this change reproduce bit-for-bit.
+        # magmom_sat_scale defaults to 1.0 (saturation ON). Setting it to 0 keeps the
+        # original hard clamp exactly, so models trained before this change reproduce
+        # bit-for-bit.
         u = magmom_lenghts / element_dependent_scaling
         if getattr(self, "magmom_sat_scale", 0.0) > 0.0:
             u = u / torch.sqrt(1.0 + u * u)
