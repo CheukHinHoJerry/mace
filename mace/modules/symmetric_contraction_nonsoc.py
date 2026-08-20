@@ -6,11 +6,14 @@ import logging
 from typing import Dict, List, Optional, Union
 
 import torch
+from torch.utils.checkpoint import checkpoint
 from e3nn import o3
 from e3nn.util.codegen import CodeGenMixin
 from opt_einsum import contract
 
 from mace.tools.cg import U_matrix_real, _wigner_nj
+
+from .cueq_nonsoc import CUEQ_NONSOC_AVAILABLE, build_paired_contractions
 
 ALPHABET = ["w", "x", "v", "n", "z", "r", "t"]
 ALPHABET_MAGMOM = ["y", "u", "o", "p", "s"]
@@ -128,10 +131,13 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
         magmom_irreps: Optional[o3.Irreps] = None,
         chunk_size: Optional[int] = 250,
         center_spin_coupling: bool = True,
+        recompute_chunks: bool = False,
+        use_cueq: bool = False,
     ) -> None:
         super().__init__()
         self.chunk_size = chunk_size
         self.center_spin_coupling = center_spin_coupling
+        self.recompute_chunks = recompute_chunks
 
         if irrep_normalization is None:
             irrep_normalization = "component"
@@ -181,6 +187,8 @@ class NonSOCSymmetricContraction(CodeGenMixin, torch.nn.Module):
                     magmom_irreps=self.magmom_irreps,
                     chunk_size=self.chunk_size,
                     center_spin_coupling=center_spin_coupling,
+                    recompute_chunks=recompute_chunks,
+                    use_cueq=use_cueq,
                 )
             )
 
@@ -204,8 +212,11 @@ class NonSOCContraction(torch.nn.Module):
         magmom_irreps: Optional[o3.Irreps] = None,
         chunk_size: Optional[int] = 250,
         center_spin_coupling: bool = True,
+        recompute_chunks: bool = False,
+        use_cueq: bool = False,
     ) -> None:
         super().__init__()
+        self.recompute_chunks = bool(recompute_chunks)
         if correlation > 3:
             raise ValueError(
                 f"NonSOCContraction supports correlation <= 3, got {correlation}. "
@@ -425,6 +436,30 @@ class NonSOCContraction(torch.nn.Module):
                     f"{self.coupling_irreps_magmom}->0e; magmom coupling would be dead."
                 )
 
+        # Optional cuEquivariance backend. Built eagerly so a missing dependency or an
+        # unsupported configuration fails here rather than mid-training.
+        self.cueq_contractions = None
+        if use_cueq:
+            if not CUEQ_NONSOC_AVAILABLE:
+                raise ImportError(
+                    "use_cueq=True needs cuequivariance; pip install cuequivariance "
+                    "cuequivariance-torch cuequivariance-ops-torch-cu12"
+                )
+            if self.out_lmax != 0:
+                raise ValueError(
+                    f"the cueq backend supports a scalar (0e) output only, got "
+                    f"{irrep_out} (lmax={self.out_lmax}); an equivariant output needs the "
+                    "2L+1 axis carried through the polynomial, which is not implemented."
+                )
+            named = dict(self.named_buffers())
+            self.cueq_contractions = build_paired_contractions(
+                [named[f"U_matrix_{nu}"] for nu in range(1, correlation + 1)],
+                [named[f"U_magmom_merged_{nu}"] for nu in range(1, correlation + 1)],
+                self.num_features,
+                correlation,
+                math_dtype=dtype,
+            )
+
     def forward_reference(
         self, x: torch.Tensor, y: torch.Tensor, m_center: Optional[torch.Tensor] = None
     ):
@@ -505,6 +540,40 @@ class NonSOCContraction(torch.nn.Module):
         # (node, channel[, 2L+1]) -> (node, channel * (2L+1)); mul-major, matching e3nn/MACE.
         return out.view(out.shape[0], -1)
 
+    def _forward_cueq(
+        self, x: torch.Tensor, y: torch.Tensor, m_center: Optional[torch.Tensor] = None
+    ):
+        # Same function as forward_reference, evaluated as one cueq SegmentedPolynomial per
+        # correlation order instead of an einsum. The centre factor v[b, Q] is folded into
+        # the weights -- exact by linearity, since v does not depend on the contracted slots.
+        buffers = dict(self.named_buffers())
+        species = torch.argmax(y, dim=-1)
+        use_center = self._use_center_spin(m_center)
+        if use_center:
+            ones = torch.ones(
+                m_center.shape[0], 1, dtype=m_center.dtype, device=m_center.device
+            )
+            centre_cols = torch.cat([ones, m_center], dim=1)
+
+        out = None
+        for nu in range(1, self.correlation + 1):
+            index = buffers[f"center_index_{nu}"]
+            widx = buffers[f"weight_index_{nu}"]
+            # (node, spatial path k, Q, channel)
+            weight_nu = self.merged_weights[f"nu{nu}"][species][:, :, widx, :]
+            if use_center:
+                v = centre_cols[:, index]
+            else:
+                # The STP was built over the FULL Q axis, so the s>=1 columns cannot be
+                # sliced away as forward_reference does; zeroing them is exactly equivalent.
+                v = (index == 0).to(dtype=weight_nu.dtype)
+                v = v.unsqueeze(0).expand(weight_nu.shape[0], -1)
+            term = self.cueq_contractions[f"nu{nu}"](
+                weight_nu * v[:, None, :, None], x
+            )
+            out = term if out is None else (out + term)
+        return out.view(out.shape[0], -1)
+
     def _use_center_spin(self, m_center: Optional[torch.Tensor]) -> bool:
         # getattr keeps models pickled before this channel existed loadable: they have
         # neither the flag nor the buffers, and fall back to the spin-scalar path.
@@ -523,17 +592,33 @@ class NonSOCContraction(torch.nn.Module):
         # into chunks bounds that scratch tensor -- numerically identical, and in
         # practice both lower-memory AND faster. chunk_size=None keeps the original
         # single-shot path. getattr() keeps models pickled before this attr existed working.
+        # The cueq backend never materializes the (spatial)^nu x (magmom)^nu scratch that
+        # motivated chunking, so it runs the whole batch in one call.
+        if getattr(self, "cueq_contractions", None) is not None:
+            return self._forward_cueq(x, y, m_center)
+
         chunk_size = getattr(self, "chunk_size", None)
         if chunk_size is None or x.shape[0] <= chunk_size:
             return self.forward_reference(x, y, m_center)
-        outs = [
-            self.forward_reference(
+
+        # Chunking alone bounds the TRANSIENT but not the retained graph: autograd still
+        # saves every chunk's intermediates, so peak memory plateaus (measured ~48 GB at
+        # 432 atoms regardless of chunk_size). Recomputing each chunk in backward is what
+        # actually frees them. Opt-in because it costs one extra forward.
+        def _chunk(i):
+            return self.forward_reference(
                 x[i : i + chunk_size],
                 y[i : i + chunk_size],
                 None if m_center is None else m_center[i : i + chunk_size],
             )
-            for i in range(0, x.shape[0], chunk_size)
-        ]
+
+        if getattr(self, "recompute_chunks", False) and torch.is_grad_enabled():
+            outs = [
+                checkpoint(_chunk, i, use_reentrant=False)
+                for i in range(0, x.shape[0], chunk_size)
+            ]
+        else:
+            outs = [_chunk(i) for i in range(0, x.shape[0], chunk_size)]
         return torch.cat(outs, dim=0)
 
     def U_tensors(self, nu: int):

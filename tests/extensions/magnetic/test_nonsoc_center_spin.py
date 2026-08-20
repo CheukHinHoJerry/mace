@@ -267,3 +267,47 @@ def test_every_parameter_receives_a_gradient():
                     f"max_m_ell={max_m_ell}, correlation={correlation}: "
                     f"{len(dead)} parameter(s) received no gradient: {dead[:6]}"
                 )
+
+
+@pytest.mark.parametrize("compute_force", [False, True])
+def test_recomputing_chunks_is_numerically_identical(compute_force):
+    """Recomputation must change memory, never numbers -- including through forces.
+
+    Chunking alone bounds the transient but not the retained graph: autograd saves every
+    chunk's intermediates, so peak memory plateaus regardless of chunk_size (~48 GB at
+    432 atoms). Recomputing each chunk in backward is what frees them, measured 59.9 GB
+    -> 7.9 GB for +43% backward time. Forces are obtained by autograd, so this path must
+    also survive DOUBLE backward.
+    """
+    with default_dtype(torch.float64):
+        positions = np.random.RandomState(1).randn(9, 3) * 2.0
+        magmoms = np.random.RandomState(2).randn(9, 3) * 0.7
+
+        def run(recompute):
+            model = _build(correlation=3, max_m_ell=2)
+            for mod in model.modules():
+                if isinstance(mod, NonSOCContraction):
+                    mod.chunk_size = 4
+                    mod.recompute_chunks = recompute
+            model.zero_grad(set_to_none=True)
+            out = model(
+                _batch(positions, magmoms),
+                training=True,
+                compute_force=compute_force,
+                compute_stress=False,
+            )
+            loss = (out["forces"] ** 2).sum() if compute_force else out["energy"].sum()
+            loss.backward()
+            return float(loss), {
+                name: param.grad.clone()
+                for name, param in model.named_parameters()
+                if param.grad is not None
+            }
+
+        loss_plain, grads_plain = run(False)
+        loss_recomp, grads_recomp = run(True)
+        assert abs(loss_plain - loss_recomp) < 1e-12
+        worst = max(
+            float((grads_plain[k] - grads_recomp[k]).abs().max()) for k in grads_plain
+        )
+        assert worst < 1e-10, f"recomputation changed gradients by {worst:.3e}"
