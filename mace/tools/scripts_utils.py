@@ -1033,13 +1033,17 @@ def get_params_options(
         hasattr(model, "onebody_magmombasis_coeffs")
         and args.train_one_body_contribution
     ):
-        param_options["params"].append(
-            {
-                "name": "onebody_magmombasis_coeffs",
-                "params": [model.onebody_magmombasis_coeffs],
-                "weight_decay": 0.0,
-            }
-        )
+        # The one-body head is a small per-element energy offset and can outrun the rest
+        # of the model, so it gets its own weight decay and optional LR scaling.
+        one_body_group = {
+            "name": "onebody_magmombasis_coeffs",
+            "params": [model.onebody_magmombasis_coeffs],
+            "weight_decay": getattr(args, "one_body_weight_decay", 0.0),
+        }
+        one_body_lr_factor = getattr(args, "one_body_lr_factor", 1.0)
+        if one_body_lr_factor != 1.0:
+            one_body_group["lr"] = one_body_lr_factor * args.lr
+        param_options["params"].append(one_body_group)
 
     # Guard against silently untrained submodules: any trainable parameter
     # that no group claims would never receive optimizer updates.Submodules
