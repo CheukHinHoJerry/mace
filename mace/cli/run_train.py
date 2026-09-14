@@ -844,6 +844,11 @@ def run(args) -> None:
 
     # Model
     model, output_args = configure_model(args, train_loader, atomic_energies, model_foundation, heads, z_table, head_configs)
+    # attach one-body knobs so the training step can read them off the model
+    model.one_body_curvature_weight = float(
+        getattr(args, "one_body_curvature_weight", 0.0)
+    )
+    model.pin_one_body_zero = bool(getattr(args, "pin_one_body_zero", False))
     model.to(device)
 
     if args.lora:

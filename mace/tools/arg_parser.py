@@ -145,6 +145,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "AtomicDielectricMACE",
             "EnergyDipolesMACE",
             "MagneticScaleShiftMACE",
+            "MagneticNonSOCScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -213,6 +214,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticResidualNonLinearInteractionBlock",
             "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -228,7 +230,23 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticResidualNonLinearInteractionBlock",
             "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
             "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
         ],
+    )
+    parser.add_argument(
+        "--contraction_cls",
+        help="symmetric-contraction class for the (non-first) layers "
+        "(magnetic non-SOC model)",
+        type=str,
+        default="NonSOCSymmetricContraction",
+        choices=["SymmetricContraction", "NonSOCSymmetricContraction"],
+    )
+    parser.add_argument(
+        "--contraction_cls_first",
+        help="symmetric-contraction class for the first layer (magnetic non-SOC model)",
+        type=str,
+        default="SymmetricContraction",
+        choices=["SymmetricContraction", "NonSOCSymmetricContraction"],
     )
     parser.add_argument(
         "--max_ell", help=r"highest \ell of spherical harmonics", type=int, default=3
@@ -1192,6 +1210,60 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "(only relevant when --use_magmom_one_body is set).",
         type=str2bool,
         default=True,
+    )
+    parser.add_argument(
+        "--magmom_sat_scale",
+        help="If > 0, saturate the moment fed to the solid harmonics at "
+        "m_sat = magmom_sat_scale * m_max, angle-preserving and smooth "
+        "(m_eff = m / sqrt(1 + |m|^2 / m_sat^2)). It also replaces the hard clamp on "
+        "|m|/m_max in the scalar magnetic radial basis with the same smooth squash, so "
+        "magforces stay C1 across m_max. 0.0 disables both and restores the raw moment "
+        "plus the clamp, reproducing models trained before this default changed. "
+        "Requires every m_max > 0.",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--one_body_spectral_degree",
+        help="Spectral smoothing of the magmom one-body head: Chebyshev degree k is "
+        "attenuated by 1/(1+k)**p, so the linear head prefers smooth low-frequency "
+        "curves. 0.0 disables it (exact no-op). Baked into the basis, so it is part of "
+        "the model and must match at evaluation time.",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--one_body_curvature_weight",
+        help="Weight of a roughness penalty on the magmom one-body curve (mean squared "
+        "discrete second derivative of E(|m|)). Damps Chebyshev ringing, especially in "
+        "the large-|m| extrapolation region of near-nonmagnetic elements. 0.0 disables.",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--pin_one_body_zero",
+        help="If true, subtract the one-body curve's value at |m|=0 on every forward pass "
+        "so the one-body magmom term vanishes at zero moment (a pure even-power "
+        "m^2+m^4+... correction, no constant m^0 term). Replaces the static "
+        "one_body_magmom_const_correction buffer.",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--one_body_lr_factor",
+        help="Multiplier on the base LR for the magmom one-body coefficient param "
+        "group (only relevant when --train_one_body_contribution). <1 slows the "
+        "one-body head to stabilize training; 1.0 = same LR as the rest.",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--one_body_weight_decay",
+        help="Weight decay applied to the magmom one-body coefficient param group "
+        "(only relevant when --train_one_body_contribution). Pulls the head toward "
+        "zero (its init) to prevent runaway per-element energy shifts.",
+        type=float,
+        default=0.0,
     )
     parser.add_argument(
         "--data_aug_magmom",

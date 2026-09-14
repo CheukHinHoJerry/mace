@@ -441,6 +441,13 @@ def take_step(
             kwargs["compute_magforces"] = True
         output = model(batch_dict, **kwargs)
         loss = loss_fn(pred=output, ref=batch)
+        # optional smoothness penalty on the one-body magmom head (param-only term,
+        # independent of the batch)
+        _base = model.module if hasattr(model, "module") else model
+        _curv_w = getattr(_base, "one_body_curvature_weight", 0.0)
+        if _curv_w and hasattr(_base, "onebody_curvature_penalty"):
+            loss = loss + _curv_w * _base.onebody_curvature_penalty()
+
         loss.backward()
         if max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
