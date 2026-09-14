@@ -524,8 +524,14 @@ def inherit_magnetic_hyperparameters_from_foundation(
             foundation_m_max = foundation_m_max.detach().cpu().tolist()
         elif hasattr(foundation_m_max, "tolist"):
             foundation_m_max = foundation_m_max.tolist()
-        args.m_max = foundation_m_max
-        inherited_magnetic_args["m_max_len"] = len(foundation_m_max)
+        # Keyed by atomic number rather than a positional list, so resolve_m_max can
+        # map it onto whatever element table the fine-tuning run ends up with (a
+        # subset of the foundation elements, or the full table with
+        # --foundation_model_elements=True).
+        foundation_zs = [int(z) for z in model_foundation.atomic_numbers.tolist()]
+        m_max_by_z = {z: float(v) for z, v in zip(foundation_zs, foundation_m_max)}
+        args.m_max = [repr(m_max_by_z)]
+        inherited_magnetic_args["m_max_len"] = len(m_max_by_z)
 
     foundation_max_m_ell = foundation_config.get("max_m_ell")
     if foundation_max_m_ell is not None:
@@ -537,6 +543,11 @@ def inherit_magnetic_hyperparameters_from_foundation(
         args.num_mag_radial_basis = int(foundation_num_mag_radial_basis)
         inherited_magnetic_args["num_mag_radial_basis"] = args.num_mag_radial_basis
 
+    foundation_use_magmom_one_body = foundation_config.get("use_magmom_one_body")
+    if foundation_use_magmom_one_body is not None:
+        args.use_magmom_one_body = bool(foundation_use_magmom_one_body)
+        inherited_magnetic_args["use_magmom_one_body"] = args.use_magmom_one_body
+
     foundation_num_mag_radial_basis_one_body = foundation_config.get(
         "num_mag_radial_basis_one_body"
     )
@@ -547,5 +558,11 @@ def inherit_magnetic_hyperparameters_from_foundation(
         inherited_magnetic_args["num_mag_radial_basis_one_body"] = (
             args.num_mag_radial_basis_one_body
         )
+
+    for key in ("one_body_spectral_degree", "magmom_sat_scale"):
+        value = foundation_config.get(key)
+        if value is not None:
+            setattr(args, key, float(value))
+            inherited_magnetic_args[key] = float(value)
 
     return inherited_magnetic_args

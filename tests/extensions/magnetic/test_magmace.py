@@ -317,9 +317,12 @@ def test_inherit_magnetic_hyperparameters_from_foundation(monkeypatch):
         lambda model: foundation_config,
     )
 
-    inherited = inherit_magnetic_hyperparameters_from_foundation(args, object())
+    foundation = SimpleNamespace(atomic_numbers=torch.tensor([26, 27, 28]))
+    inherited = inherit_magnetic_hyperparameters_from_foundation(args, foundation)
 
-    assert args.m_max == [2, 3, 4]
+    # Keyed by atomic number so it resolves onto any element table, not just the
+    # foundation's own (resolve_m_max understands the single dict-literal token).
+    assert args.m_max == ["{26: 2.0, 27: 3.0, 28: 4.0}"]
     assert args.max_m_ell == 5
     assert args.num_mag_radial_basis == 6
     assert args.num_mag_radial_basis_one_body == 7

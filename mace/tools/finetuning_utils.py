@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 import torch
@@ -38,6 +39,16 @@ def load_foundations_elements(
     layout; everything else falls through to the default (vanilla MACE) path.
     ``default_dtype`` is only meaningful for the default branch (the magnetic
     branch was ported from a pre-default_dtype cut of the paper repo)."""
+    if model.__class__.__name__ == "MagneticNonSOCScaleShiftMACE":
+        return load_foundations_elements_nonsoc(
+            model,
+            model_foundations,
+            table,
+            load_readout,
+            use_shift,
+            use_scale,
+            default_dtype=default_dtype,
+        )
     if "Magnetic" in str(model.__class__.__name__):
         return load_foundations_elements_magnetic(
             model, model_foundations, table, load_readout, use_shift, use_scale, max_L
@@ -52,6 +63,118 @@ def load_foundations_elements(
         max_L,
         default_dtype=default_dtype,
     )
+
+
+def _transfer_readouts(
+    model: torch.nn.Module,
+    model_foundations: torch.nn.Module,
+    num_channels_foundation: int,
+    model_heads,
+) -> None:
+    """Copy the (single-head) foundation readouts into every head of ``model``,
+    with the fan-in rescaling that keeps each head equal to the foundation output."""
+    for i, readout in enumerate(model.readouts):
+        if readout.__class__.__name__ == "LinearReadoutBlock":
+            model_readouts_zero_linear_weight = readout.linear.weight.clone()
+            model_readouts_zero_linear_weight = (
+                model_foundations.readouts[i]
+                .linear.weight.view(num_channels_foundation, -1)
+                .repeat(1, len(model_heads))
+                .flatten()
+                .clone()
+            )
+            readout.linear.weight = torch.nn.Parameter(
+                model_readouts_zero_linear_weight
+            )
+        if readout.__class__.__name__ in [
+            "NonLinearBiasReadoutBlock",
+            "NonLinearReadoutBlock",
+        ]:
+            assert hasattr(readout, "linear_1") or hasattr(
+                readout, "linear_mid"
+            ), "Readout block must have linear_1 or linear_mid"
+            if hasattr(readout, "linear_1"):
+                shape_input_1 = (
+                    model_foundations.readouts[i]
+                    .linear_1.__dict__["irreps_out"]
+                    .num_irreps
+                )
+                shape_output_1 = readout.linear_1.__dict__["irreps_out"].num_irreps
+            else:
+                raise ValueError("Readout block must have linear_1")
+            if hasattr(readout, "linear_1"):
+                model_readouts_one_linear_1_weight = readout.linear_1.weight.clone()
+                model_readouts_one_linear_1_weight = (
+                    model_foundations.readouts[i]
+                    .linear_1.weight.view(num_channels_foundation, -1)
+                    .repeat(1, len(model_heads))
+                    .flatten()
+                    .clone()
+                )
+                readout.linear_1.weight = torch.nn.Parameter(
+                    model_readouts_one_linear_1_weight
+                )
+                if (
+                    readout.linear_1.bias is not None
+                    and readout.linear_1.bias.numel() > 0
+                ):
+                    model_readouts_one_linear_1_bias = (
+                        model_foundations.readouts[i]
+                        .linear_1.bias.view(-1)
+                        .repeat(len(model_heads))
+                        .clone()
+                    )
+                    readout.linear_1.bias = torch.nn.Parameter(
+                        model_readouts_one_linear_1_bias
+                    )
+            if hasattr(readout, "linear_mid"):
+                readout.linear_mid.weight = torch.nn.Parameter(
+                    model_foundations.readouts[i]
+                    .linear_mid.weight.view(
+                        shape_input_1,
+                        shape_input_1,
+                    )
+                    .repeat(len(model_heads), len(model_heads))
+                    .flatten()
+                    .clone()
+                    / ((shape_input_1) / (shape_output_1)) ** 0.5
+                )
+                # if it has biases transfer them too
+                if (
+                    readout.linear_mid.bias is not None
+                    and readout.linear_mid.bias.numel() > 0
+                ):
+                    readout.linear_mid.bias = torch.nn.Parameter(
+                        model_foundations.readouts[i]
+                        .linear_mid.bias.repeat(len(model_heads))
+                        .clone()
+                    )
+            if hasattr(readout, "linear_2"):
+                model_readouts_one_linear_2_weight = readout.linear_2.weight.clone()
+                model_readouts_one_linear_2_weight = model_foundations.readouts[
+                    i
+                ].linear_2.weight.view(shape_input_1, -1).repeat(
+                    len(model_heads), len(model_heads)
+                ).flatten().clone() / (
+                    ((shape_input_1) / (shape_output_1)) ** 0.5
+                )
+                readout.linear_2.weight = torch.nn.Parameter(
+                    model_readouts_one_linear_2_weight
+                )
+                if (
+                    readout.linear_2.bias is not None
+                    and readout.linear_2.bias.numel() > 0
+                ):
+                    model_readouts_one_linear_2_bias = (
+                        model_foundations.readouts[i]
+                        .linear_2.bias.view(-1)
+                        .repeat(len(model_heads))
+                        .flatten()
+                        .clone()
+                    )
+                    readout.linear_2.bias = torch.nn.Parameter(
+                        model_readouts_one_linear_2_bias
+                    )
 
 
 def load_foundations_elements_default(
@@ -298,109 +421,9 @@ def load_foundations_elements_default(
         )
 
     if load_readout:
-        # Transferring readouts
-        for i, readout in enumerate(model.readouts):
-            if readout.__class__.__name__ == "LinearReadoutBlock":
-                model_readouts_zero_linear_weight = readout.linear.weight.clone()
-                model_readouts_zero_linear_weight = (
-                    model_foundations.readouts[i]
-                    .linear.weight.view(num_channels_foundation, -1)
-                    .repeat(1, len(model_heads))
-                    .flatten()
-                    .clone()
-                )
-                readout.linear.weight = torch.nn.Parameter(
-                    model_readouts_zero_linear_weight
-                )
-            if readout.__class__.__name__ in [
-                "NonLinearBiasReadoutBlock",
-                "NonLinearReadoutBlock",
-            ]:
-                assert hasattr(readout, "linear_1") or hasattr(
-                    readout, "linear_mid"
-                ), "Readout block must have linear_1 or linear_mid"
-                if hasattr(readout, "linear_1"):
-                    shape_input_1 = (
-                        model_foundations.readouts[i]
-                        .linear_1.__dict__["irreps_out"]
-                        .num_irreps
-                    )
-                    shape_output_1 = readout.linear_1.__dict__["irreps_out"].num_irreps
-                else:
-                    raise ValueError("Readout block must have linear_1")
-                if hasattr(readout, "linear_1"):
-                    model_readouts_one_linear_1_weight = readout.linear_1.weight.clone()
-                    model_readouts_one_linear_1_weight = (
-                        model_foundations.readouts[i]
-                        .linear_1.weight.view(num_channels_foundation, -1)
-                        .repeat(1, len(model_heads))
-                        .flatten()
-                        .clone()
-                    )
-                    readout.linear_1.weight = torch.nn.Parameter(
-                        model_readouts_one_linear_1_weight
-                    )
-                    if (
-                        readout.linear_1.bias is not None
-                        and readout.linear_1.bias.numel() > 0
-                    ):
-                        model_readouts_one_linear_1_bias = (
-                            model_foundations.readouts[i]
-                            .linear_1.bias.view(-1)
-                            .repeat(len(model_heads))
-                            .clone()
-                        )
-                        readout.linear_1.bias = torch.nn.Parameter(
-                            model_readouts_one_linear_1_bias
-                        )
-                if hasattr(readout, "linear_mid"):
-                    readout.linear_mid.weight = torch.nn.Parameter(
-                        model_foundations.readouts[i]
-                        .linear_mid.weight.view(
-                            shape_input_1,
-                            shape_input_1,
-                        )
-                        .repeat(len(model_heads), len(model_heads))
-                        .flatten()
-                        .clone()
-                        / ((shape_input_1) / (shape_output_1)) ** 0.5
-                    )
-                    # if it has biases transfer them too
-                    if (
-                        readout.linear_mid.bias is not None
-                        and readout.linear_mid.bias.numel() > 0
-                    ):
-                        readout.linear_mid.bias = torch.nn.Parameter(
-                            model_foundations.readouts[i]
-                            .linear_mid.bias.repeat(len(model_heads))
-                            .clone()
-                        )
-                if hasattr(readout, "linear_2"):
-                    model_readouts_one_linear_2_weight = readout.linear_2.weight.clone()
-                    model_readouts_one_linear_2_weight = model_foundations.readouts[
-                        i
-                    ].linear_2.weight.view(shape_input_1, -1).repeat(
-                        len(model_heads), len(model_heads)
-                    ).flatten().clone() / (
-                        ((shape_input_1) / (shape_output_1)) ** 0.5
-                    )
-                    readout.linear_2.weight = torch.nn.Parameter(
-                        model_readouts_one_linear_2_weight
-                    )
-                    if (
-                        readout.linear_2.bias is not None
-                        and readout.linear_2.bias.numel() > 0
-                    ):
-                        model_readouts_one_linear_2_bias = (
-                            model_foundations.readouts[i]
-                            .linear_2.bias.view(-1)
-                            .repeat(len(model_heads))
-                            .flatten()
-                            .clone()
-                        )
-                        readout.linear_2.bias = torch.nn.Parameter(
-                            model_readouts_one_linear_2_bias
-                        )
+        _transfer_readouts(
+            model, model_foundations, num_channels_foundation, model_heads
+        )
     _handled_attrs = {"interactions", "products", "readouts"}
     for attr_name, module in model.named_children():
         if attr_name in _handled_attrs:
@@ -464,6 +487,130 @@ def load_foundations_elements_default(
 
     model.to(target_dtype)
 
+    return model
+
+
+# Per-head tensors of the non-SOC model that a single-head foundation must be
+# broadcast into (head axis in parentheses), on top of the readouts and scale_shift.
+_NONSOC_PER_HEAD_TENSORS = {
+    "onebody_magmombasis_coeffs": -1,  # (num_elements, num_basis, heads)
+    "one_body_magmom_const_correction": -1,  # (num_elements, heads)
+}
+
+
+def load_foundations_elements_nonsoc(
+    model: torch.nn.Module,
+    model_foundations: torch.nn.Module,
+    table: AtomicNumberTable,
+    load_readout=False,
+    use_shift=True,
+    use_scale=True,
+    default_dtype: Optional[torch.dtype] = None,
+):
+    """Load a MagneticNonSOCScaleShiftMACE foundation into a fine-tuning model.
+
+    The non-SOC layers (plain ``RealAgnosticDensityInteractionBlock`` first, then the
+    ``MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock`` with the merged
+    ``NonSOCSymmetricContraction`` weights) share none of the tensor layout the SOC
+    loader assumes, so this loader copies every tensor by name instead. That is only
+    exact when the fine-tuning model keeps the foundation element table, hence the
+    check below: with a smaller table every element-indexed tensor would be silently
+    skipped and the model would start from random weights.
+
+    Head handling for multihead fine-tuning: the readouts, ``scale_shift`` and the
+    one-body magmom tensors of the (single-head) foundation are repeated into every
+    head so each head initially reproduces the foundation energies. The per-head
+    ``atomic_energies`` are deliberately left alone: run_train assembles them per head
+    (E0s of the fine-tuning data, ``--E0s=foundation`` for the pt_head) before the
+    model is built.
+    """
+    assert model_foundations.r_max == model.r_max
+    foundation_zs = [int(z) for z in model_foundations.atomic_numbers]
+    if [int(z) for z in table.zs] != foundation_zs:
+        raise ValueError(
+            "Fine-tuning a MagneticNonSOCScaleShiftMACE foundation requires the "
+            "foundation element table: the non-SOC contraction weights are indexed by "
+            f"element and are not re-mapped. Got {len(table.zs)} elements "
+            f"{list(table.zs)} but the foundation has {len(foundation_zs)}; pass "
+            "--foundation_model_elements=True."
+        )
+    foundation_heads = list(getattr(model_foundations, "heads", ["Default"]))
+    if len(foundation_heads) != 1:
+        raise ValueError(
+            "Fine-tuning from a multi-head MagneticNonSOCScaleShiftMACE foundation is "
+            f"not supported (foundation heads: {foundation_heads})."
+        )
+    model_heads = model.heads
+    n_heads = len(model_heads)
+    target_dtype = default_dtype or next(model.parameters()).dtype
+
+    if hasattr(model, "m_max") and not torch.equal(
+        model.m_max.cpu().to(torch.float64),
+        model_foundations.m_max.cpu().to(torch.float64),
+    ):
+        logging.warning(
+            "The --m_max of the fine-tuning model differs from the foundation's; the "
+            "foundation values are kept (its magnetic basis was trained with them)."
+        )
+
+    skip_prefixes = ("readouts.", "scale_shift.")
+    skip_names = {"atomic_energies_fn.atomic_energies"}
+    model_state = model.state_dict()
+    foundation_state = model_foundations.state_dict()
+    transferred, skipped = [], []
+    for name, param in foundation_state.items():
+        if name.startswith(skip_prefixes) or name in skip_names:
+            continue
+        if name not in model_state:
+            skipped.append(f"{name} (absent in the new model)")
+            continue
+        target = model_state[name]
+        head_axis = _NONSOC_PER_HEAD_TENSORS.get(name)
+        if target.shape == param.shape:
+            target.copy_(param)
+        elif (
+            head_axis is not None
+            and param.shape[head_axis] == 1
+            and target.shape[head_axis] == n_heads
+            and target.shape[:head_axis] == param.shape[:head_axis]
+        ):
+            target.copy_(param.expand(target.shape))
+        else:
+            skipped.append(f"{name} {tuple(param.shape)} -> {tuple(target.shape)}")
+            continue
+        transferred.append(name)
+    if skipped:
+        raise ValueError(
+            "Foundation tensors could not be transferred into the fine-tuning model "
+            "(architecture mismatch between --foundation_model and the CLI flags?): "
+            + "; ".join(skipped)
+        )
+
+    if getattr(model_foundations, "scale_shift", None) is not None and hasattr(
+        model, "scale_shift"
+    ):
+        if use_scale:
+            model.scale_shift.scale = model_foundations.scale_shift.scale.repeat(
+                n_heads
+            ).clone()
+        if use_shift:
+            model.scale_shift.shift = model_foundations.scale_shift.shift.repeat(
+                n_heads
+            ).clone()
+
+    if load_readout:
+        num_channels_foundation = model_foundations.node_embedding.linear.weight.shape[
+            0
+        ] // len(foundation_zs)
+        _transfer_readouts(
+            model, model_foundations, num_channels_foundation, model_heads
+        )
+
+    logging.info(
+        f"Transferred {len(transferred)} tensors from the non-SOC foundation model "
+        f"into {n_heads} head(s)"
+    )
+    model.to(target_dtype)
     return model
 
 
