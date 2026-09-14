@@ -233,10 +233,11 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "MACELES",
         "PolarMACE",
         "MagneticScaleShiftMACE",
+        "MagneticNonSOCScaleShiftMACE",
         "AtomicDielectricMACE",
     ]:
         return {
-            "error": "Model is not a ScaleShiftMACE, MACELES, PolarMACE, MagneticScaleShiftMACE, or AtomicDielectricMACE model"
+            "error": "Model is not a ScaleShiftMACE, MACELES, PolarMACE, MagneticScaleShiftMACE, MagneticNonSOCScaleShiftMACE, or AtomicDielectricMACE model"
         }
 
     def radial_to_name(radial_type):
@@ -327,7 +328,10 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "distance_transform": radial_to_transform(model.radial_embedding),
         "heads": heads,
     }
-    if model.__class__.__name__ == "MagneticScaleShiftMACE":
+    if model.__class__.__name__ in (
+        "MagneticScaleShiftMACE",
+        "MagneticNonSOCScaleShiftMACE",
+    ):
         config["m_max"] = model.m_max.cpu().tolist()
         config["max_m_ell"] = int(model.mag_solid_harmoics.SH.l_max())
         config["num_mag_radial_basis"] = int(model.mag_radial_embedding.num_basis)
@@ -336,6 +340,16 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
             config["num_mag_radial_basis_one_body"] = int(
                 model.onebody_magmombasis_coeffs.shape[1]
             )
+            # Both are baked into the basis, so a fine-tuned model must match them.
+            # Checkpoints from before these knobs existed behave as 0.0.
+            config["one_body_spectral_degree"] = float(
+                getattr(
+                    getattr(model, "one_body_cheb_basis_with_const", None),
+                    "degree_scale_power",
+                    0.0,
+                )
+            )
+        config["magmom_sat_scale"] = float(getattr(model, "magmom_sat_scale", 0.0))
     if hasattr(model, "atomic_energies_fn"):
         config["atomic_energies"] = (
             model.atomic_energies_fn.atomic_energies.cpu().numpy()
@@ -463,7 +477,16 @@ def remove_pt_head(
     for name, param in state_dict.items():
         if "atomic_energies" in name:
             new_state_dict[name] = param[head_idx : head_idx + 1]
-        elif "scale" in name or "shift" in name:
+        elif name in (
+            "onebody_magmombasis_coeffs",  # (num_elements, num_basis, heads)
+            "one_body_magmom_const_correction",  # (num_elements, heads)
+        ):
+            new_state_dict[name] = param[..., head_idx : head_idx + 1]
+        elif ("scale" in name or "shift" in name) and param.shape == (
+            len(model.heads),
+        ):
+            # per-head scale_shift only; the magnetic radial bases also carry a
+            # "degree_scale" buffer (one entry per basis function, not per head)
             new_state_dict[name] = param[head_idx : head_idx + 1]
         elif "embedding_readout.linear" in name:
             new_state_dict[name] = param.reshape(-1, len(model.heads))[
