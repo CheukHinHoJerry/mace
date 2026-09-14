@@ -553,7 +553,11 @@ def load_foundations_elements_nonsoc(
             "foundation values are kept (its magnetic basis was trained with them)."
         )
 
+    # Handled below with a head broadcast. embedding_readout is only skipped here
+    # when the new model can receive it; otherwise it is reported as missing.
     skip_prefixes = ("readouts.", "scale_shift.")
+    if hasattr(model, "embedding_readout"):
+        skip_prefixes += ("embedding_readout.",)
     skip_names = {"atomic_energies_fn.atomic_energies"}
     model_state = model.state_dict()
     foundation_state = model_foundations.state_dict()
@@ -605,6 +609,15 @@ def load_foundations_elements_nonsoc(
         _transfer_readouts(
             model, model_foundations, num_channels_foundation, model_heads
         )
+        if hasattr(model, "embedding_readout"):
+            # (channels,) -> (channels, heads) flattened, as in the default loader
+            for (_, param_1), (_, param_2) in zip(
+                model.embedding_readout.named_parameters(),
+                model_foundations.embedding_readout.named_parameters(),
+            ):
+                param_1.data.copy_(
+                    param_2.data.reshape(-1, 1).repeat(1, n_heads).flatten()
+                )
 
     logging.info(
         f"Transferred {len(transferred)} tensors from the non-SOC foundation model "
@@ -612,6 +625,43 @@ def load_foundations_elements_nonsoc(
     )
     model.to(target_dtype)
     return model
+
+
+def _transfer_one_body_magmom(
+    model: torch.nn.Module,
+    model_foundations: torch.nn.Module,
+    indices_weights,
+    n_heads: int,
+) -> None:
+    """Element-remap and head-broadcast the one-body magmom tensors of a single-head
+    magnetic foundation (``onebody_magmombasis_coeffs`` (elements, basis, heads) and
+    ``one_body_magmom_const_correction`` (elements, heads))."""
+    if not getattr(model_foundations, "use_magmom_one_body", False):
+        return
+    if not getattr(model, "use_magmom_one_body", False):
+        raise ValueError(
+            "The foundation model has a one-body magmom term but the fine-tuning model "
+            "was built with --use_magmom_one_body=False."
+        )
+    src = model_foundations.onebody_magmombasis_coeffs.detach()
+    dst = model.onebody_magmombasis_coeffs
+    if src.shape[-1] != 1:
+        raise ValueError(
+            "Fine-tuning from a multi-head magnetic foundation is not supported "
+            f"(one-body coefficients have {src.shape[-1]} heads)."
+        )
+    if dst.shape[1] != src.shape[1]:
+        raise ValueError(
+            f"--num_mag_radial_basis_one_body={dst.shape[1]} does not match the "
+            f"foundation model ({src.shape[1]})."
+        )
+    with torch.no_grad():
+        dst.copy_(src[indices_weights].expand(-1, -1, n_heads))
+        model.one_body_magmom_const_correction.copy_(
+            model_foundations.one_body_magmom_const_correction.detach()[
+                indices_weights
+            ].expand(-1, n_heads)
+        )
 
 
 def load_foundations_elements_magnetic(
@@ -825,6 +875,9 @@ def load_foundations_elements_magnetic(
         model.readouts[1].linear_2.weight = torch.nn.Parameter(
             model_readouts_one_linear_2_weight
         )
+    _transfer_one_body_magmom(
+        model, model_foundations, indices_weights, len(model_heads)
+    )
     if model_foundations.scale_shift is not None:
         if use_scale:
             model.scale_shift.scale = model_foundations.scale_shift.scale.repeat(

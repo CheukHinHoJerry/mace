@@ -477,7 +477,16 @@ def remove_pt_head(
     for name, param in state_dict.items():
         if "atomic_energies" in name:
             new_state_dict[name] = param[head_idx : head_idx + 1]
-        elif "scale" in name or "shift" in name:
+        elif name in (
+            "onebody_magmombasis_coeffs",  # (num_elements, num_basis, heads)
+            "one_body_magmom_const_correction",  # (num_elements, heads)
+        ):
+            new_state_dict[name] = param[..., head_idx : head_idx + 1]
+        elif ("scale" in name or "shift" in name) and param.shape == (
+            len(model.heads),
+        ):
+            # per-head scale_shift only; the magnetic radial bases also carry a
+            # "degree_scale" buffer (one entry per basis function, not per head)
             new_state_dict[name] = param[head_idx : head_idx + 1]
         elif "embedding_readout.linear" in name:
             new_state_dict[name] = param.reshape(-1, len(model.heads))[

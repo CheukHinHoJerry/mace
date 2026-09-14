@@ -14,10 +14,18 @@ import pytest
 import torch
 from e3nn import o3
 
-from mace.modules import MagneticNonSOCScaleShiftMACE, interaction_classes
+from mace.modules import (
+    MagneticNonSOCScaleShiftMACE,
+    MagneticScaleShiftMACE,
+    interaction_classes,
+)
 from mace.tools.finetuning_utils import load_foundations_elements
 from mace.tools.multihead_tools import inherit_magnetic_hyperparameters_from_foundation
-from mace.tools.scripts_utils import extract_config_mace_model, resolve_m_max
+from mace.tools.scripts_utils import (
+    extract_config_mace_model,
+    remove_pt_head,
+    resolve_m_max,
+)
 from mace.tools.torch_tools import default_dtype
 from mace.tools.utils import AtomicNumberTable
 
@@ -25,7 +33,7 @@ _RMAX = 3.0
 _ZS = [26, 28]
 
 
-def _build(heads=None, atomic_numbers=None, seed=1, use_one_body=True):
+def _build(heads=None, atomic_numbers=None, seed=1, use_one_body=True, **extra_kwargs):
     torch.manual_seed(seed)
     zs = list(atomic_numbers or _ZS)
     heads = list(heads or ["Default"])
@@ -59,6 +67,7 @@ def _build(heads=None, atomic_numbers=None, seed=1, use_one_body=True):
         max_m_ell=1,
         use_magmom_one_body=use_one_body,
         heads=heads,
+        **extra_kwargs,
     )
 
 
@@ -172,3 +181,112 @@ def test_architecture_mismatch_is_reported_not_skipped():
             load_foundations_elements(
                 model, foundation, AtomicNumberTable(_ZS), load_readout=True, max_L=0
             )
+
+
+@pytest.mark.parametrize("keep", ["Default", "pt_head"])
+def test_remove_pt_head_keeps_the_selected_head(keep):
+    """A multi-head non-SOC checkpoint is cut down to one head before it is used as a
+    foundation; the one-body magmom tensors carry a head axis and must be sliced too."""
+    with default_dtype(torch.float64):
+        heads = ["Default", "pt_head"]
+        multihead = _build(heads=heads)
+        _randomize_(multihead, seed=11)
+        with torch.no_grad():  # distinct per-head one-body curves and E0s
+            multihead.onebody_magmombasis_coeffs[..., 1] *= 3.0
+            multihead.one_body_magmom_const_correction[:, 1] += 0.5
+            multihead.atomic_energies_fn.atomic_energies[1] += 1.0
+        single = remove_pt_head(multihead, keep)
+        assert single.heads == [keep]
+        assert single.onebody_magmombasis_coeffs.shape[-1] == 1
+        h = heads.index(keep)
+        e_ref, f_ref = _eval(multihead, _batch(head=h, n_heads=2))
+        e, f = _eval(single, _batch(head=0, n_heads=1))
+        assert torch.allclose(e, e_ref, atol=1e-10, rtol=0), (keep, e, e_ref)
+        assert torch.allclose(f, f_ref, atol=1e-10, rtol=0)
+
+
+def test_embedding_readout_is_broadcast_over_heads():
+    specs = {"x": {"type": "continuous", "per": "atom", "in_dim": 1, "emb_dim": 4}}
+    with default_dtype(torch.float64):
+        foundation = _build(embedding_specs=specs, use_embedding_readout=True)
+        _randomize_(foundation, seed=5)
+        model = _build(
+            heads=["Default", "pt_head"],
+            seed=2,
+            embedding_specs=specs,
+            use_embedding_readout=True,
+        )
+        load_foundations_elements(
+            model, foundation, AtomicNumberTable(_ZS), load_readout=True, max_L=0
+        )
+        got = model.embedding_readout.linear.weight.detach().reshape(-1, 2)
+        want = foundation.embedding_readout.linear.weight.detach()
+        for h in range(2):
+            assert torch.equal(got[:, h], want)
+        for (name, p_new), (_, p_old) in zip(
+            model.joint_embedding.named_parameters(),
+            foundation.joint_embedding.named_parameters(),
+        ):
+            assert torch.equal(p_new, p_old), name
+
+
+def test_foundation_embedding_readout_is_not_dropped_silently():
+    specs = {"x": {"type": "continuous", "per": "atom", "in_dim": 1, "emb_dim": 4}}
+    with default_dtype(torch.float64):
+        foundation = _build(embedding_specs=specs, use_embedding_readout=True)
+        model = _build(embedding_specs=specs, use_embedding_readout=False)
+        with pytest.raises(ValueError, match="embedding_readout"):
+            load_foundations_elements(
+                model, foundation, AtomicNumberTable(_ZS), load_readout=True, max_L=0
+            )
+
+
+def _build_soc(heads, atomic_numbers, seed):
+    torch.manual_seed(seed)
+    cls = interaction_classes[
+        "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock"
+    ]
+    return MagneticScaleShiftMACE(
+        r_max=_RMAX,
+        num_bessel=4,
+        num_polynomial_cutoff=4,
+        max_ell=2,
+        interaction_cls=cls,
+        interaction_cls_first=cls,
+        num_interactions=2,
+        num_elements=len(atomic_numbers),
+        hidden_irreps=o3.Irreps("8x0e"),
+        MLP_irreps=o3.Irreps("4x0e"),
+        atomic_energies=np.zeros((len(heads), len(atomic_numbers))),
+        avg_num_neighbors=2.0,
+        atomic_numbers=list(atomic_numbers),
+        correlation=3,  # the SOC loader assumes the correlation-3 contraction layout
+        gate=torch.nn.functional.silu,
+        atomic_inter_shift=[0.0] * len(heads),
+        atomic_inter_scale=[1.0] * len(heads),
+        m_max=[2.5, 1.5][: len(atomic_numbers)],
+        num_mag_radial_basis=4,
+        num_mag_radial_basis_one_body=3,
+        max_m_ell=1,
+        use_magmom_one_body=True,
+        heads=list(heads),
+    )
+
+
+def test_soc_loader_transfers_the_one_body_term():
+    """The SOC loader rebuilds the model layer by layer and used to leave the one-body
+    magmom tensors at their zero init; with use_magmom_one_body now inherited from the
+    foundation they must be element-remapped and broadcast over heads like the rest."""
+    with default_dtype(torch.float64):
+        foundation = _build_soc(["Default"], _ZS, seed=3)
+        _randomize_(foundation, seed=9)
+        model = _build_soc(["Default", "pt_head"], [28], seed=4)
+        load_foundations_elements(
+            model, foundation, AtomicNumberTable([28]), load_readout=True, max_L=0
+        )
+        src = foundation.onebody_magmombasis_coeffs.detach()[1]  # Ni row, (basis, 1)
+        got = model.onebody_magmombasis_coeffs.detach()[0]  # (basis, 2)
+        for h in range(2):
+            assert torch.equal(got[:, h], src[:, 0])
+        corr = foundation.one_body_magmom_const_correction[1, 0]
+        assert torch.equal(model.one_body_magmom_const_correction[0], corr.expand(2))
