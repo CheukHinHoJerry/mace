@@ -2388,9 +2388,9 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock(
     Chebyshev basis is nonzero there).
 
     Here the radial basis carries no envelope (the model sets apply_cutoff=False, so
-    edge_feats is the raw basis) and the envelope u(r_ij) multiplies, once, both weight
-    sets and both edge densities. Parameter names and shapes are those of the
-    non-envelope block.
+    edge_feats is the raw basis) and the envelope u(r_ij) is applied once: to
+    conv_tp_r_weights (the message A = r_msg (x) m_msg then carries a single u) and to
+    both edge densities. Parameter names and shapes are those of the non-envelope block.
     """
 
     # Tells MagneticNonSOCScaleShiftMACE to build the radial basis without the envelope
@@ -2614,9 +2614,8 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock(
         edge_density_magmom = torch.tanh(
             self.density_fn_magmom(magmom_inv_feats_j) ** 2
         )
-        # The envelope is applied here only: edge_feats carry none.
+        # Applied once per message: A_msg = r_msg (x) m_msg, so only the r factor takes it.
         tp_r_weights = tp_r_weights * cutoff
-        tp_m_weights = tp_m_weights * cutoff
         edge_density = edge_density * cutoff
         edge_density_magmom = edge_density_magmom * cutoff
 
