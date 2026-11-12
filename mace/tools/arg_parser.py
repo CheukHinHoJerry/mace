@@ -1234,6 +1234,13 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--nonsoc_chunk_size",
+        help="Non-SOC model: atoms per chunk in the symmetric contraction (memory only; "
+        "results identical). Default: the contraction's own (250).",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
         "--one_body_spectral_degree",
         help="Spectral smoothing of the magmom one-body head: Chebyshev degree k is "
         "attenuated by 1/(1+k)**p, so the linear head prefers smooth low-frequency "

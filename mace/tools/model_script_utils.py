@@ -288,6 +288,7 @@ def _build_model(
             contraction_cls=getattr(
                 args, "contraction_cls", "NonSOCSymmetricContraction"
             ),
+            nonsoc_chunk_size=getattr(args, "nonsoc_chunk_size", None),
             contraction_cls_first=getattr(
                 args, "contraction_cls_first", "SymmetricContraction"
             ),

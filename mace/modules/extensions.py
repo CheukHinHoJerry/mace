@@ -2230,6 +2230,7 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
         first_cls = kwargs["interaction_cls_first"]
         inter_cls = kwargs["interaction_cls"]
         contraction_cls = kwargs.pop("contraction_cls", "NonSOCSymmetricContraction")
+        nonsoc_chunk_size = kwargs.pop("nonsoc_chunk_size", None)
         contraction_cls_first = kwargs.pop(
             "contraction_cls_first", "SymmetricContraction"
         )
@@ -2314,6 +2315,12 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                 )
             )
         self.products = products
+        # Atoms per chunk in the non-SOC contraction (runtime memory knob only; results
+        # are identical). None keeps the contraction's own default.
+        if nonsoc_chunk_size is not None:
+            for mod in self.products.modules():
+                if hasattr(mod, "chunk_size"):
+                    mod.chunk_size = int(nonsoc_chunk_size)
 
     def _saturate_magmom(
         self, magmom: torch.Tensor, node_attrs: torch.Tensor

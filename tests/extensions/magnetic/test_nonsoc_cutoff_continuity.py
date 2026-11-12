@@ -241,3 +241,20 @@ def test_magmom_attrs_by_sat_rescales_spin_features_only():
             MagneticNonSOCScaleShiftMACE(
                 **{**kw, "magmom_attrs_by_sat": True, "magmom_sat_scale": 0.0}
             )
+
+
+def test_nonsoc_chunk_size_sets_contraction_chunks_and_keeps_results():
+    pos = np.array([[0, 0, 0], [-2.0, 0.3, 0.1], [1.5, 0.4, -0.2], [0.3, 1.7, 0.5]])
+    mag = np.vstack([_MAG, [[0.3, -0.2, 1.9]]])
+    with default_dtype(torch.float64):
+        kw = _build_kwargs(_NEW)
+        torch.manual_seed(1)
+        ref = MagneticNonSOCScaleShiftMACE(**kw)
+        torch.manual_seed(1)
+        chunked = MagneticNonSOCScaleShiftMACE(**{**kw, "nonsoc_chunk_size": 1})
+        sizes = {m.chunk_size for m in chunked.products.modules() if hasattr(m, "chunk_size")}
+        assert sizes == {1}
+        a = ref(_batch(pos, mag), training=True, compute_magforces=True)
+        b = chunked(_batch(pos, mag), training=True, compute_magforces=True)
+        for k in ("energy", "forces", "magforces"):
+            assert torch.allclose(a[k], b[k], atol=1e-12), k
