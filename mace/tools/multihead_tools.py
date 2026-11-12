@@ -564,5 +564,9 @@ def inherit_magnetic_hyperparameters_from_foundation(
         if value is not None:
             setattr(args, key, float(value))
             inherited_magnetic_args[key] = float(value)
+    value = foundation_config.get("magmom_attrs_by_sat")
+    if value is not None:
+        args.magmom_attrs_by_sat = bool(value)
+        inherited_magnetic_args["magmom_attrs_by_sat"] = bool(value)
 
     return inherited_magnetic_args

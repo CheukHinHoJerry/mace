@@ -284,6 +284,7 @@ def _build_model(
             use_magmom_one_body=args.use_magmom_one_body,
             one_body_spectral_degree=getattr(args, "one_body_spectral_degree", 0.0),
             magmom_sat_scale=getattr(args, "magmom_sat_scale", 1.0),
+            magmom_attrs_by_sat=getattr(args, "magmom_attrs_by_sat", False),
             contraction_cls=getattr(
                 args, "contraction_cls", "NonSOCSymmetricContraction"
             ),
@@ -316,6 +317,7 @@ def _build_model(
             use_magmom_one_body=args.use_magmom_one_body,
             one_body_spectral_degree=getattr(args, "one_body_spectral_degree", 0.0),
             magmom_sat_scale=getattr(args, "magmom_sat_scale", 1.0),
+            magmom_attrs_by_sat=getattr(args, "magmom_attrs_by_sat", False),
         )
     if args.model == "MACE":
         if args.interaction_first not in [

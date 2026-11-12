@@ -1488,6 +1488,7 @@ class MagneticMACE(torch.nn.Module):
         lammps_mliap: Optional[bool] = False,
         readout_cls: Optional[Type[NonLinearReadoutBlock]] = NonLinearReadoutBlock,
         magmom_sat_scale: float = 1.0,
+        magmom_attrs_by_sat: bool = False,
     ):
         super().__init__()
 
@@ -1519,6 +1520,13 @@ class MagneticMACE(torch.nn.Module):
                 torch.full_like(sat, float("inf")),
             )
             self.register_buffer("m_sat", sat)
+        # Optional: feed m_eff / m_sat (dimensionless, |.| < 1) to the solid harmonics instead
+        # of m_eff in muB, so the spin features are O(1) rather than ~|m|^l. A fixed
+        # per-element rescaling: same function space, better-scaled start. Absent on
+        # existing checkpoints -> off.
+        self.magmom_attrs_by_sat = bool(magmom_attrs_by_sat)
+        if self.magmom_attrs_by_sat and self.magmom_sat_scale <= 0.0:
+            raise ValueError("magmom_attrs_by_sat needs magmom_sat_scale > 0 (it divides by m_sat).")
         self.register_buffer(
             "num_interactions", torch.tensor(num_interactions, dtype=torch.int64)
         )
@@ -1905,6 +1913,8 @@ class MagneticScaleShiftMACE(MagneticMACE):
             * torch.clamp(magmom_lengths / element_dependent_scaling, min=0.0, max=1.0)
             ** 2
         )
+        if getattr(self, "magmom_attrs_by_sat", False):
+            raise ValueError("magmom_attrs_by_sat is only implemented for the non-SOC model.")
         magmom_node_attrs = self.mag_solid_harmoics(data["magmom"])
 
         #
@@ -2411,9 +2421,12 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
         else:
             u = torch.clamp(u, min=0.0, max=1.0)
         magmom_lenghts_trans = 1 - 2 * u**2
-        magmom_node_attrs = self.mag_solid_harmoics(
-            self._saturate_magmom(data["magmom"], data["node_attrs"])
-        )
+        magmom_eff = self._saturate_magmom(data["magmom"], data["node_attrs"])
+        if getattr(self, "magmom_attrs_by_sat", False):
+            magmom_eff = magmom_eff / self.m_sat[
+                torch.argmax(data["node_attrs"], dim=1)
+            ].unsqueeze(-1)
+        magmom_node_attrs = self.mag_solid_harmoics(magmom_eff)
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans)
         if hasattr(self, "one_body_cheb_basis_with_const"):
             magmom_one_body_radials = self.one_body_cheb_basis_with_const(

@@ -1226,6 +1226,14 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
     )
     parser.add_argument(
+        "--magmom_attrs_by_sat",
+        help="Non-SOC model: feed m_eff / m_sat (dimensionless, |.| < 1) to the magnetic "
+        "solid harmonics instead of m_eff in muB, so the spin features are O(1) instead of "
+        "~|m|^l. Needs --magmom_sat_scale > 0. Off reproduces existing models.",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
         "--one_body_spectral_degree",
         help="Spectral smoothing of the magmom one-body head: Chebyshev degree k is "
         "attenuated by 1/(1+k)**p, so the linear head prefers smooth low-frequency "

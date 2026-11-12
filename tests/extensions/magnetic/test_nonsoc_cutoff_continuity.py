@@ -178,3 +178,66 @@ def test_envelope_block_requires_cutoff():
                 magmom_node_inv_feats=torch.zeros(n, 4),
                 magmom_node_attrs=torch.zeros(n, 4),
             )
+
+
+def test_pooled_outer_product_matches_per_edge_scatter():
+    from mace.modules.blocks import pooled_outer_product
+    from mace.tools.scatter import scatter_sum
+
+    torch.manual_seed(0)
+    with default_dtype(torch.float64):
+        n_nodes, n_edges = 7, 40
+        receiver = torch.randint(0, n_nodes - 1, (n_edges,))  # last node has no edges
+        r = torch.randn(n_edges, 3, 4, requires_grad=True)
+        m = torch.randn(n_edges, 3, 5, requires_grad=True)
+        ref = scatter_sum(
+            torch.einsum("ekl,ekp->eklp", r, m), receiver, dim=0, dim_size=n_nodes
+        )
+        out = pooled_outer_product(r, m, receiver, n_nodes)
+        assert torch.allclose(out, ref, atol=1e-13)
+        w = torch.randn_like(ref)
+        g_ref = torch.autograd.grad((ref * w).sum(), (r, m), create_graph=True)
+        g_out = torch.autograd.grad((out * w).sum(), (r, m), create_graph=True)
+        for a, b in zip(g_ref, g_out):
+            assert torch.allclose(a, b, atol=1e-13)
+        assert pooled_outer_product(r[:0], m[:0], receiver[:0], n_nodes).abs().sum() == 0
+
+
+def test_model_energy_and_forces_same_with_receiver_pooling():
+    from mace.modules.blocks import (
+        MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock as B,
+    )
+
+    pos = np.array([[0, 0, 0], [-2.0, 0.3, 0.1], [1.5, 0.4, -0.2], [0.3, 1.7, 0.5]])
+    mag = np.vstack([_MAG, [[0.3, -0.2, 1.9]]])
+    out = {}
+    with default_dtype(torch.float64):
+        model = _build(_NEW)
+        for flag in (False, True):
+            B.pool_by_receiver = flag
+            o = model(_batch(pos, mag), training=True, compute_magforces=True)
+            out[flag] = [o[k].detach() for k in ("energy", "forces", "magforces")]
+    B.pool_by_receiver = True
+    for a, b in zip(out[False], out[True]):
+        assert torch.allclose(a, b, atol=1e-12)
+
+
+def test_magmom_attrs_by_sat_rescales_spin_features_only():
+    """m_eff / m_sat: solid harmonics scale by m_sat^-l; the model stays spin-rotation
+    invariant and the flag is off by default."""
+    with default_dtype(torch.float64):
+        assert not _build(_NEW).magmom_attrs_by_sat
+        kw = _build_kwargs(_NEW)
+        torch.manual_seed(1)
+        model = MagneticNonSOCScaleShiftMACE(**{**kw, "magmom_attrs_by_sat": True})
+        pos = np.vstack([_POS01, [[3.0, 0.0, 0.0]]])
+        e = _energy(model, 3.0)
+        rot = torch.tensor(
+            [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64
+        ).numpy()
+        out = model(_batch(pos, _MAG @ rot.T), training=False, compute_force=False)
+        assert float(out["energy"].detach()) == pytest.approx(e, abs=1e-10)
+        with pytest.raises(ValueError, match="magmom_sat_scale"):
+            MagneticNonSOCScaleShiftMACE(
+                **{**kw, "magmom_attrs_by_sat": True, "magmom_sat_scale": 0.0}
+            )

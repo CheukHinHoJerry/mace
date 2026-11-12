@@ -2373,6 +2373,29 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock(
         return pooled_A, None
 
 
+def pooled_outer_product(
+    r: torch.Tensor, m: torch.Tensor, receiver: torch.Tensor, num_nodes: int
+) -> torch.Tensor:
+    """sum_{e: receiver[e]=i} r[e, k, l] * m[e, k, p]  ->  [num_nodes, k, l, p].
+
+    Same result as scatter_sum(einsum("ekl,ekp->eklp", r, m), receiver), but the edges
+    are grouped by receiver into zero-padded blocks and summed with a batched matmul, so
+    the per-edge outer product is never materialised (in the forward or the backward).
+    """
+    n_edges, k, n_l = r.shape
+    n_p = m.shape[-1]
+    if n_edges == 0:
+        return r.new_zeros(num_nodes, k, n_l, n_p)
+    order = torch.argsort(receiver, stable=True)
+    recv = receiver[order]
+    counts = torch.bincount(recv, minlength=num_nodes)
+    slot = torch.arange(n_edges, device=r.device) - (torch.cumsum(counts, 0) - counts)[recv]
+    max_nb = int(counts.max())
+    r_pad = r.new_zeros(num_nodes, max_nb, k, n_l).index_put((recv, slot), r[order])
+    m_pad = m.new_zeros(num_nodes, max_nb, k, n_p).index_put((recv, slot), m[order])
+    return torch.einsum("njkl,njkp->nklp", r_pad, m_pad)
+
+
 class MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock(
     MagneticInteractionBlock
 ):
@@ -2396,6 +2419,9 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock(
     # Tells MagneticNonSOCScaleShiftMACE to build the radial basis without the envelope
     # and to pass `cutoff` to every interaction.
     apply_envelope: bool = True
+    # Sum r_msg (x) m_msg over each atom's neighbours as a batched matmul instead of
+    # materialising the per-edge outer product [n_edges, k, L_r, L_m].
+    pool_by_receiver: bool = True
 
     def _setup(self) -> None:
         if not hasattr(self, "cueq_config"):
@@ -2635,12 +2661,16 @@ class MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock(
         # reshape_irreps emits [batch, channel, angular] in the default mul_ir layout and
         # [batch, angular, channel] under cueq's ir_mul; both are paired into
         # [batch, channel, angular_r, angular_m].
-        if self._ir_mul_layout:
-            A_msg = torch.einsum("blk,bpk->bklp", r_msg, m_msg)
+        if self.pool_by_receiver:
+            if self._ir_mul_layout:
+                r_msg, m_msg = r_msg.transpose(1, 2), m_msg.transpose(1, 2)
+            pooled_A = pooled_outer_product(r_msg, m_msg, receiver, num_nodes)
         else:
-            A_msg = torch.einsum("bkl,bkp->bklp", r_msg, m_msg)
-
-        pooled_A = scatter_sum(src=A_msg, index=receiver, dim=0, dim_size=num_nodes)
+            if self._ir_mul_layout:
+                A_msg = torch.einsum("blk,bpk->bklp", r_msg, m_msg)
+            else:
+                A_msg = torch.einsum("bkl,bkp->bklp", r_msg, m_msg)
+            pooled_A = scatter_sum(src=A_msg, index=receiver, dim=0, dim_size=num_nodes)
 
         density = scatter_sum(
             src=edge_density, index=receiver, dim=0, dim_size=num_nodes

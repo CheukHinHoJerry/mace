@@ -354,6 +354,7 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
                 )
             )
         config["magmom_sat_scale"] = float(getattr(model, "magmom_sat_scale", 0.0))
+        config["magmom_attrs_by_sat"] = bool(getattr(model, "magmom_attrs_by_sat", False))
     if hasattr(model, "atomic_energies_fn"):
         config["atomic_energies"] = (
             model.atomic_energies_fn.atomic_energies.cpu().numpy()
