@@ -277,7 +277,11 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
             len(model.products[0].symmetric_contractions.contractions[0].weights) + 1
         )
     except AttributeError:
-        correlation = model.products[0].symmetric_contractions.contraction_degree
+        sc = model.products[0].symmetric_contractions
+        if hasattr(sc, "contraction_degree"):
+            correlation = sc.contraction_degree
+        else:  # NonSOCSymmetricContraction (magnetic first layer)
+            correlation = sc.contractions[0].correlation
     config = {
         "r_max": model.r_max.item(),
         "num_bessel": len(model.radial_embedding.bessel_fn.bessel_weights),
