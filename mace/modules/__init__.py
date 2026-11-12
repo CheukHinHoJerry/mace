@@ -13,6 +13,7 @@ from .blocks import (
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock,
     MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
     NonLinearBiasReadoutBlock,
@@ -77,6 +78,7 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "RealAgnosticDensityResidualInteractionBlock": RealAgnosticDensityResidualInteractionBlock,
     "RealAgnosticResidualNonLinearInteractionBlock": RealAgnosticResidualNonLinearInteractionBlock,
     "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityEnvelopeInteractionBlock,
     "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
     "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
 }

@@ -1,4 +1,5 @@
 # pylint: disable=too-many-lines  # magnetic MACE variants live here
+import inspect
 import logging
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Type, Union
@@ -2258,6 +2259,18 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                 cueq_config=getattr(i0, "cueq_config", None),
             )
 
+        # Envelope blocks take the cutoff entirely out of the radial basis: edge_feats are
+        # the raw basis and every interaction multiplies its radial weights and edge
+        # densities by u(r) itself, so all of them must accept `cutoff`.
+        if any(getattr(i, "apply_envelope", False) for i in self.interactions):
+            for inter in self.interactions:
+                if "cutoff" not in inspect.signature(type(inter).forward).parameters:
+                    raise ValueError(
+                        f"{type(inter).__name__} does not accept `cutoff`; it cannot be "
+                        "combined with an envelope interaction block."
+                    )
+            self.radial_embedding.apply_cutoff = False
+
         # Per-layer hidden irreps (single value -> uniform list; backward compatible).
         # NB: o3.Irreps subclasses tuple, so check it before list/tuple.
         if isinstance(hidden_irreps, o3.Irreps):
@@ -2365,9 +2378,12 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
             shifts=data["shifts"],
         )
         edge_attrs = self.spherical_harmonics(vectors)
-        edge_feats, _ = self.radial_embedding(
+        # cutoff is None unless the envelope was taken out of the radial basis (see
+        # __init__); then edge_feats are the raw basis and every interaction applies u(r).
+        edge_feats, cutoff = self.radial_embedding(
             lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
         )
+        cutoff_kwargs = {} if cutoff is None else {"cutoff": cutoff}
         if hasattr(self, "pair_repulsion"):
             pair_node_energy = self.pair_repulsion_fn(
                 lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
@@ -2420,6 +2436,7 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                     edge_index=data["edge_index"],
                     magmom_node_inv_feats=magmom_node_feats,
                     magmom_node_attrs=magmom_node_attrs,
+                    **cutoff_kwargs,
                 )
             else:
                 node_feats, sc = interaction(
@@ -2428,6 +2445,7 @@ class MagneticNonSOCScaleShiftMACE(MagneticScaleShiftMACE):
                     edge_attrs=edge_attrs,
                     edge_feats=edge_feats,
                     edge_index=data["edge_index"],
+                    **cutoff_kwargs,
                 )
 
             node_feats = product(
